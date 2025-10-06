@@ -1,3 +1,4 @@
 data/*
 eval_results/*
 checkpoints/*
+__pycache__/*
