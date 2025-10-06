@@ -1,6 +1,6 @@
-data/*
+/data/
 eval_results/*
-checkpoints/*
+/checkpoints/
 __pycache__/*checkpoints/
 *.pth
 *.pt
