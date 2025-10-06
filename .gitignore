@@ -1,4 +1,7 @@
 data/*
 eval_results/*
 checkpoints/*
-__pycache__/*
+__pycache__/*checkpoints/
+*.pth
+*.pt
+*.ckpt
