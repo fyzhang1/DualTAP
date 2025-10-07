@@ -38,4 +38,4 @@ class Config:
     eval_interval = 1  # 每N个epoch评估一次
     
     # 测试单个app
-    test_single_app = "amazon"  # 设置为None则使用所有app
+    test_single_app = "email"  # 设置为None则使用所有app

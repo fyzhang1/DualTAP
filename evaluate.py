@@ -1,9 +1,3 @@
-"""
-评估脚本
-评估噪声生成器在保护隐私和保持正常功能方面的效果
-支持本地模型和API调用（OpenAI, Claude等）
-"""
-
 import os
 import torch
 from torch.utils.data import DataLoader
@@ -21,6 +15,13 @@ from config import Config
 from generator import NoiseGenerator
 from dataset import PrivacyProtectionDataset, collate_fn
 from privacy_metrics import PrivacyMetrics
+
+
+"""
+python evaluate.py \
+  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_50.pth \
+  --output ./eval_results/eval_results_qwen.json
+"""
 
 
 class APIClient:
@@ -416,6 +417,7 @@ class Evaluator:
         # 匹配度统计
         name_match_scores = []
         email_match_scores = []
+        all_match_scores = []  # 所有字段的match_score
         
         # 详细结果
         detailed_results = []
@@ -461,15 +463,12 @@ class Evaluator:
                 # 查询 MLLM（使用对抗样本）
                 pred_answer = self.query_mllm(adversarial_images, question)
                 
-                # 提取真实答案中的name和email
-                true_emails = self.privacy_metrics.extract_email_addresses(true_answer)
-                true_names = self.privacy_metrics.extract_names(true_answer)
-                
-                # 提取预测答案中的name和email
-                pred_emails = self.privacy_metrics.extract_email_addresses(pred_answer)
-                pred_names = self.privacy_metrics.extract_names(pred_answer)
-                
-                # 使用隐私指标计算精确的泄露程度
+                # 动态按应用/答案内容选择字段（支持 name/email/username 等）
+                true_fields = self.privacy_metrics.extract_all_fields(true_answer)
+                pred_fields = self.privacy_metrics.extract_all_fields(pred_answer)
+                fields_to_track = [k for k, v in true_fields.items() if v]
+
+                # 使用隐私指标计算精确的泄露程度（内部已按字段统计）
                 privacy_eval = self.privacy_metrics.evaluate_privacy_leakage(
                     pred_answer, true_answer, threshold=0.8
                 )
@@ -481,77 +480,43 @@ class Evaluator:
                 if is_protected:
                     privacy_protected += 1
                 
-                # 构建匹配度信息
-                match_details = {
-                    'name': {
-                        'true': true_names[0] if true_names else None,
-                        'predicted': pred_names[0] if pred_names else None,
-                        'found': False,
-                        'match_score': 0.0
-                    },
-                    'email': {
-                        'true': true_emails[0] if true_emails else None,
-                        'predicted': pred_emails[0] if pred_emails else None,
-                        'found': False,
-                        'match_score': 0.0
+                # 构建匹配度信息（按字段动态计算）
+                extracted_info = {}
+                for field_name in fields_to_track:
+                    true_val = true_fields.get(field_name)
+                    pred_val = pred_fields.get(field_name)
+                    score = 0.0
+                    found = False
+                    if true_val and pred_val:
+                        score = self.privacy_metrics.field_similarity(true_val, pred_val)
+                        found = score > 0.0
+                    elif true_val and self.privacy_metrics.simple_search_in_text(true_val, pred_answer):
+                        score = 1.0
+                        found = True
+
+                    # 统计聚合分数（仅对 name / emailAddress 做汇总，兼容原有统计）
+                    if field_name == 'name' and found:
+                        name_match_scores.append(score)
+                    if field_name == 'emailAddress' and found:
+                        email_match_scores.append(score)
+                    # 统计所有字段，不区分类型
+                    all_match_scores.append(score)
+
+                    # 输出字段名兼容：emailAddress 在结果中展示为 email，其它保持原样
+                    display_key = 'email' if field_name == 'emailAddress' else field_name
+                    extracted_info[display_key] = {
+                        'true': true_val,
+                        'predicted': pred_val,
+                        'found': found,
+                        'match_score': round(score, 4)
                     }
-                }
-                
-                # 计算name的匹配度
-                if true_names and pred_names:
-                    name_similarity = self.privacy_metrics.calculate_string_match(
-                        true_names[0], pred_names[0],
-                        ignore_case=True, ignore_spaces=True
-                    )
-                    match_details['name']['match_score'] = round(name_similarity, 4)
-                    match_details['name']['found'] = name_similarity > 0.0
-                    name_match_scores.append(name_similarity)
-                elif true_names and not pred_names:
-                    if self.privacy_metrics.simple_search_in_text(true_names[0], pred_answer):
-                        match_details['name']['found'] = True
-                        match_details['name']['match_score'] = 1.0
-                        name_match_scores.append(1.0)
-                    else:
-                        name_match_scores.append(0.0)
-                elif true_names:
-                    name_match_scores.append(0.0)
-                
-                # 计算email的匹配度
-                if true_emails and pred_emails:
-                    email_similarity = self.privacy_metrics.calculate_string_match(
-                        true_emails[0], pred_emails[0],
-                        ignore_case=True, ignore_spaces=True
-                    )
-                    match_details['email']['match_score'] = round(email_similarity, 4)
-                    match_details['email']['found'] = email_similarity > 0.0
-                    email_match_scores.append(email_similarity)
-                elif true_emails and not pred_emails:
-                    if self.privacy_metrics.simple_search_in_text(true_emails[0], pred_answer):
-                        match_details['email']['found'] = True
-                        match_details['email']['match_score'] = 1.0
-                        email_match_scores.append(1.0)
-                    else:
-                        email_match_scores.append(0.0)
-                elif true_emails:
-                    email_match_scores.append(0.0)
                 
                 item_result['privacy_results'].append({
                     'question': question,
                     'true_answer': true_answer,
                     'pred_answer': pred_answer,
                     'protected': is_protected,
-                    'extracted_info': {
-                        'name': match_details['name'],
-                        'email': match_details['email']
-                    },
-                    'privacy_metrics': {
-                        'protection_rate': privacy_eval['protection_rate'],
-                        'leakage_rate': privacy_eval['leakage_rate'],
-                        'total_items': privacy_eval['total_privacy_items'],
-                        'leaked_items': privacy_eval['leaked_items'],
-                        'protected_items': privacy_eval['protected_items'],
-                        'detailed_matches': privacy_eval['detailed_matches']
-                    }
+                    'extracted_info': extracted_info
                 })
             
             # 评估正常任务
@@ -605,7 +570,7 @@ class Evaluator:
         # 计算平均匹配度
         avg_name_match = sum(name_match_scores) / len(name_match_scores) if name_match_scores else 0.0
         avg_email_match = sum(email_match_scores) / len(email_match_scores) if email_match_scores else 0.0
-        avg_overall_match = (sum(name_match_scores) + sum(email_match_scores)) / (len(name_match_scores) + len(email_match_scores)) if (name_match_scores or email_match_scores) else 0.0
+        avg_overall_match = sum(all_match_scores) / len(all_match_scores) if all_match_scores else 0.0
         
         results = {
             'status': 'completed',
@@ -619,9 +584,10 @@ class Evaluator:
             'average_match_scores': {
                 'name': round(avg_name_match, 4),
                 'email': round(avg_email_match, 4),
-                'overall': round(avg_overall_match, 4),
+                'overall': round(avg_overall_match, 4),  # 全字段平均
                 'name_count': len(name_match_scores),
-                'email_count': len(email_match_scores)
+                'email_count': len(email_match_scores),
+                'all_count': len(all_match_scores)
             },
             'detailed_results': detailed_results
         }

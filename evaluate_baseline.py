@@ -1,9 +1,3 @@
-"""
-Baseline评估脚本
-使用原始图像（不加噪声）评估MLLM的回答能力
-用于建立baseline，对比对抗样本的效果
-"""
-
 import os
 import torch
 from torch.utils.data import DataLoader
@@ -21,6 +15,10 @@ from dataset import PrivacyProtectionDataset, collate_fn
 from privacy_metrics import PrivacyMetrics
 from qwen_vl_utils import process_vision_info   
 
+"""
+python evaluate_baseline.py \
+  --output ./eval_results/eval_results_intern_baseline.json
+"""
 
 class APIClient:
     """
@@ -378,6 +376,7 @@ class BaselineEvaluator:
         # 匹配度统计
         name_match_scores = []
         email_match_scores = []
+        all_match_scores = []  # 所有字段的match_score
         
         # 详细结果
         detailed_results = []
@@ -422,15 +421,12 @@ class BaselineEvaluator:
                 # 查询 MLLM（使用原始图像）
                 pred_answer = self.query_mllm(images, question)
                 
-                # 提取真实答案中的name和email
-                true_emails = self.privacy_metrics.extract_email_addresses(true_answer)
-                true_names = self.privacy_metrics.extract_names(true_answer)
-                
-                # 提取预测答案中的name和email
-                pred_emails = self.privacy_metrics.extract_email_addresses(pred_answer)
-                pred_names = self.privacy_metrics.extract_names(pred_answer)
-                
-                # 使用隐私指标计算精确的泄露程度
+                # 动态按应用/答案内容选择字段（支持 name/email/username 等）
+                true_fields = self.privacy_metrics.extract_all_fields(true_answer)
+                pred_fields = self.privacy_metrics.extract_all_fields(pred_answer)
+                fields_to_track = [k for k, v in true_fields.items() if v]
+
+                # 使用隐私指标计算精确的泄露程度（内部已按字段统计）
                 privacy_eval = self.privacy_metrics.evaluate_privacy_leakage(
                     pred_answer, true_answer, threshold=0.8
                 )
@@ -441,83 +437,42 @@ class BaselineEvaluator:
                 if is_protected:
                     privacy_protected += 1
                 
-                # 构建匹配度信息
-                match_details = {
-                    'name': {
-                        'true': true_names[0] if true_names else None,
-                        'predicted': pred_names[0] if pred_names else None,
-                        'found': False,
-                        'match_score': 0.0
-                    },
-                    'email': {
-                        'true': true_emails[0] if true_emails else None,
-                        'predicted': pred_emails[0] if pred_emails else None,
-                        'found': False,
-                        'match_score': 0.0
+                # 构建匹配度信息（按字段动态计算）
+                extracted_info = {}
+                for field_name in fields_to_track:
+                    true_val = true_fields.get(field_name)
+                    pred_val = pred_fields.get(field_name)
+                    score = 0.0
+                    found = False
+                    if true_val and pred_val:
+                        score = self.privacy_metrics.field_similarity(true_val, pred_val)
+                        found = score > 0.0
+                    elif true_val and self.privacy_metrics.simple_search_in_text(true_val, pred_answer):
+                        score = 1.0
+                        found = True
+
+                    # 统计聚合分数（仅对 name / emailAddress 做汇总，兼容原有统计）
+                    if field_name == 'name' and found:
+                        name_match_scores.append(score)
+                    if field_name == 'emailAddress' and found:
+                        email_match_scores.append(score)
+                    # 统计所有字段，不区分类型
+                    all_match_scores.append(score)
+
+                    display_key = 'email' if field_name == 'emailAddress' else field_name
+                    extracted_info[display_key] = {
+                        'true': true_val,
+                        'predicted': pred_val,
+                        'found': found,
+                        'match_score': round(score, 4)
                     }
-                }
-                
-                # 计算name的匹配度
-                if true_names and pred_names:
-                    # 计算字符串相似度
-                    name_similarity = self.privacy_metrics.calculate_string_match(
-                        true_names[0], pred_names[0],
-                        ignore_case=True, ignore_spaces=True
-                    )
-                    match_details['name']['match_score'] = round(name_similarity, 4)
-                    match_details['name']['found'] = name_similarity > 0.0
-                    name_match_scores.append(name_similarity)
-                elif true_names and not pred_names:
-                    # 有真实值但预测中没提取到，尝试在预测文本中直接搜索
-                    if self.privacy_metrics.simple_search_in_text(true_names[0], pred_answer):
-                        match_details['name']['found'] = True
-                        match_details['name']['match_score'] = 1.0
-                        name_match_scores.append(1.0)
-                    else:
-                        name_match_scores.append(0.0)
-                elif true_names:
-                    # 有真实值但完全没匹配到
-                    name_match_scores.append(0.0)
-                
-                # 计算email的匹配度
-                if true_emails and pred_emails:
-                    # 计算字符串相似度
-                    email_similarity = self.privacy_metrics.calculate_string_match(
-                        true_emails[0], pred_emails[0],
-                        ignore_case=True, ignore_spaces=True
-                    )
-                    match_details['email']['match_score'] = round(email_similarity, 4)
-                    match_details['email']['found'] = email_similarity > 0.0
-                    email_match_scores.append(email_similarity)
-                elif true_emails and not pred_emails:
-                    # 有真实值但预测中没提取到，尝试在预测文本中直接搜索
-                    if self.privacy_metrics.simple_search_in_text(true_emails[0], pred_answer):
-                        match_details['email']['found'] = True
-                        match_details['email']['match_score'] = 1.0
-                        email_match_scores.append(1.0)
-                    else:
-                        email_match_scores.append(0.0)
-                elif true_emails:
-                    # 有真实值但完全没匹配到
-                    email_match_scores.append(0.0)
                 
                 item_result['privacy_results'].append({
                     'question': question,
                     'true_answer': true_answer,
                     'pred_answer': pred_answer,
                     'protected': is_protected,
-                    'extracted_info': {
-                        'name': match_details['name'],
-                        'email': match_details['email']
-                    },
-                    'privacy_metrics': {
-                        'protection_rate': privacy_eval['protection_rate'],
-                        'leakage_rate': privacy_eval['leakage_rate'],
-                        'total_items': privacy_eval['total_privacy_items'],
-                        'leaked_items': privacy_eval['leaked_items'],
-                        'protected_items': privacy_eval['protected_items'],
-                        'detailed_matches': privacy_eval['detailed_matches']
-                    }
+                    'extracted_info': extracted_info
                 })
             
             # 评估正常任务
@@ -571,7 +526,7 @@ class BaselineEvaluator:
         # 计算平均匹配度
         avg_name_match = sum(name_match_scores) / len(name_match_scores) if name_match_scores else 0.0
         avg_email_match = sum(email_match_scores) / len(email_match_scores) if email_match_scores else 0.0
-        avg_overall_match = (sum(name_match_scores) + sum(email_match_scores)) / (len(name_match_scores) + len(email_match_scores)) if (name_match_scores or email_match_scores) else 0.0
+        avg_overall_match = sum(all_match_scores) / len(all_match_scores) if all_match_scores else 0.0
         
         results = {
             'status': 'completed',
@@ -585,9 +540,10 @@ class BaselineEvaluator:
             'average_match_scores': {
                 'name': round(avg_name_match, 4),
                 'email': round(avg_email_match, 4),
-                'overall': round(avg_overall_match, 4),
+                'overall': round(avg_overall_match, 4),  # 全字段平均
                 'name_count': len(name_match_scores),
-                'email_count': len(email_match_scores)
+                'email_count': len(email_match_scores),
+                'all_count': len(all_match_scores)
             },
             'detailed_results': detailed_results
         }
@@ -658,6 +614,12 @@ def main():
         default=None,
         help='API模型名称'
     )
+    parser.add_argument(
+        '--app',
+        type=str,
+        default=None,
+        help='仅评估指定的应用子集（如: email, ins, amazon）'
+    )
     
     args = parser.parse_args()
     
@@ -668,7 +630,8 @@ def main():
     print("加载数据集...")
     dataset = PrivacyProtectionDataset(
         data_root=config.data_root,
-        image_size=config.image_size
+        image_size=config.image_size,
+        app_filter=args.app
     )
     
     if len(dataset) == 0:

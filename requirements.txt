@@ -8,6 +8,9 @@ tqdm>=4.65.0
 accelerate>=0.20.0
 bitsandbytes>=0.41.0
 
+# 隐私评估
+rapidfuzz>=3.0.0  # 模糊匹配（用于隐私指标计算）
+
 # API评估支持（按需安装）
 openai>=1.0.0  # OpenAI GPT-4V等
 anthropic>=0.18.0  # Claude

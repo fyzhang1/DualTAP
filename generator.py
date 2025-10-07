@@ -1,8 +1,3 @@
-"""
-噪声生成器网络
-使用 U-Net 架构生成对抗性噪声
-"""
-
 import torch
 import torch.nn as nn
 

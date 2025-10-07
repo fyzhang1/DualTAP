@@ -216,7 +216,6 @@ def compute_privacy_task_loss(images, qa_pairs, tokenizer, model, device):
 
 
 class AdversarialTrainer:
-    """对抗训练器（改进版）"""
     
     def __init__(self, config):
         self.config = config
@@ -243,7 +242,6 @@ class AdversarialTrainer:
             trust_remote_code=True
         )
         
-        # 初始化噪声生成器
         print("初始化噪声生成器")
         self.generator = NoiseGenerator(
             in_channels=3,
@@ -257,11 +255,11 @@ class AdversarialTrainer:
             lr=config.learning_rate
         )
         
-        # 创建保存目录
+
         os.makedirs(config.checkpoint_dir, exist_ok=True)
         os.makedirs(config.log_dir, exist_ok=True)
         
-        # 训练历史
+
         self.history = {
             'epoch': [],
             'loss_total': [],
@@ -272,15 +270,6 @@ class AdversarialTrainer:
         }
     
     def train_step(self, batch):
-        """
-        单步训练
-        
-        Args:
-            batch: 一个 batch 的数据
-        
-        Returns:
-            dict: 包含各种损失和指标
-        """
         images = batch['images'].to(self.device)
         privacy_qa_list = batch['privacy_qa_list']
         normal_qa_list = batch['normal_qa_list']

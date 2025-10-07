@@ -1,10 +1,5 @@
-"""
-数据集加载器（适配现有格式）
-支持按 app 分类的隐私数据和正常任务数据
-"""
-
-import os
 import json
+import os
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
@@ -45,23 +40,33 @@ class PrivacyProtectionDataset(Dataset):
         self.data_items = []
         self._load_data()
     
-    def _parse_privacy_answer(self, answer_dict):
+    def _parse_privacy_answer(self, answer_data):
         """
-        解析隐私答案字典，转换为简单文本
+        解析隐私答案，支持字符串和字典两种格式
         
         Args:
-            answer_dict: {"name": ["John"], "emailAddress": ["john@example.com"]}
+            answer_data: 可以是字符串 "emailAddress: xxx" 
+                        或字典 {"name": ["John"], "emailAddress": ["john@example.com"]}
         
         Returns:
             str: "name: John, emailAddress: john@example.com"
         """
-        parts = []
-        for key, values in answer_dict.items():
-            if isinstance(values, list) and len(values) > 0:
-                # 将值列表合并
-                value_str = ", ".join(str(v) for v in values)
-                parts.append(f"{key}: {value_str}")
-        return "; ".join(parts) if parts else "No privacy information"
+        # 如果已经是字符串，直接返回
+        if isinstance(answer_data, str):
+            return answer_data
+        
+        # 如果是字典，解析为字符串
+        if isinstance(answer_data, dict):
+            parts = []
+            for key, values in answer_data.items():
+                if isinstance(values, list) and len(values) > 0:
+                    # 将值列表合并
+                    value_str = ", ".join(str(v) for v in values)
+                    parts.append(f"{key}: {value_str}")
+            return "; ".join(parts) if parts else "No privacy information"
+        
+        # 其他情况返回默认值
+        return "No privacy information"
     
     def _load_data(self):
         """加载所有 app 的数据"""
@@ -122,12 +127,13 @@ class PrivacyProtectionDataset(Dataset):
                 normal_qa_list = normal_qa.get(img_key, [])
                 
                 # 转换格式
-                # 隐私QA: 将answer字典转换为文本
+                # 隐私QA: 将answer转换为统一的文本格式（支持字符串和字典）
                 converted_privacy_qa = []
                 for qa in privacy_qa_list:
                     question = qa.get('question', '')
-                    answer_dict = qa.get('answer', {})
-                    answer_text = self._parse_privacy_answer(answer_dict)
+                    # 兼容 'answer' 和 'answers' 两种字段名
+                    answer_data = qa.get('answers', qa.get('answer', ''))
+                    answer_text = self._parse_privacy_answer(answer_data)
                     converted_privacy_qa.append({
                         'question': question,
                         'answer': answer_text
