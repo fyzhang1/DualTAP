@@ -1,7 +1,7 @@
 import os
 import torch
 from torch.utils.data import DataLoader
-from transformers import AutoProcessor, AutoModel
+from transformers import AutoProcessor, AutoModel, Qwen2_5_VLForConditionalGeneration
 from tqdm import tqdm
 import json
 from PIL import Image
@@ -19,8 +19,8 @@ from privacy_metrics import PrivacyMetrics
 
 """
 python evaluate.py \
-  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_50.pth \
-  --output ./eval_results/eval_results_qwen.json
+  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_30.pth \
+  --output ./eval_results/eval_results_test1.json
 """
 
 
@@ -65,7 +65,7 @@ class APIClient:
                 import google.generativeai as genai
                 genai.configure(api_key=self.api_key)
                 self.client = genai
-                self.model_name = model_name or "gemini-1.5-pro"
+                self.model_name = model_name or "gemini-2.0-flash"
             except ImportError:
                 raise ImportError("请安装 google-generativeai 库: pip install google-generativeai")
         
@@ -226,17 +226,29 @@ class Evaluator:
         else:
             # 使用本地模型模式
             print(f"加载本地模型: {config.surrogate_model_name}")
-            # 使用 AutoModelForVision2Seq 自动识别模型类型（支持Qwen2VL, LLaVA等）
-            self.surrogate_model = AutoModel.from_pretrained(
-                config.surrogate_model_name,
-                torch_dtype=torch.float16,
-                device_map="auto",  # 自动设备映射
-                trust_remote_code=True  # Qwen模型需要
-            )
+            
+            # 加载 processor（所有模型都需要）
             self.processor = AutoProcessor.from_pretrained(
                 config.surrogate_model_name,
                 trust_remote_code=True
             )
+            
+            # 根据模型类型加载对应的模型
+            if config.surrogate_model_name == "Qwen/Qwen2.5-VL-7B-Instruct":
+                self.surrogate_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    config.surrogate_model_name,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+            else:
+                self.surrogate_model = AutoModel.from_pretrained(
+                    config.surrogate_model_name,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+            
             self.surrogate_model.eval()
             self.api_client = None
     

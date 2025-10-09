@@ -232,8 +232,8 @@ cat logs/train_history.json
 
 ```bash
 python evaluate.py \
-  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_50.pth \
-  --output ./eval_results/eval_results_qwen.json
+  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_21.pth \
+  --output ./eval_results/eval_results_epoch21.json
 ```
 
 评估结果示例：
@@ -270,8 +270,8 @@ python evaluate.py \
 ```bash
 python inference.py \
   --image /home/ecs-user/Agent_VLM/data/amazon/images/amazon_0.png \
-  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_50.pth \
-  --output protected_image.jpg
+  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_21.pth \
+  --output protected_image_amazon.jpg
 ```
 
 输出：

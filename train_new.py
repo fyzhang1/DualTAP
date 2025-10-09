@@ -15,7 +15,7 @@ from config import Config
 from dataset import PrivacyProtectionDataset, collate_fn
 from generator import NoiseGenerator
 from utils import calculate_psnr, calculate_linf_norm
-
+from set_seed_example import set_seed
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -82,7 +82,7 @@ def build_internvl_inputs(question, answer, tokenizer, model, max_len=1024, num_
     return input_ids, attention_mask, labels, image_flags
 
 
-def compute_normal_task_loss(images, qa_pairs, tokenizer, model, device):
+def compute_normal_task_loss(images, qa_pairs, tokenizer, model, device, print_debug=False, debug_prefix=""):
     total_loss, num_samples = 0.0, 0
     batch_size = images.shape[0]
     model_dtype = next(model.parameters()).dtype  # 与模型对齐 (fp16)
@@ -91,58 +91,73 @@ def compute_normal_task_loss(images, qa_pairs, tokenizer, model, device):
         qa_list = qa_pairs[i]
         if not qa_list:
             continue
-        qa = qa_list[np.random.randint(len(qa_list))]
-        question, answer = qa['question'], qa['answer']
+        # 遍历该图对应的所有正常QA对（确保图和QA固定对应）
+        for qa in qa_list:
+            question, answer = qa['question'], qa['answer']
 
-        # 预处理图像
-        image = images[i:i+1]
-        image_resized = T.Resize((448, 448), interpolation=InterpolationMode.BICUBIC)(image)
-        pixel_values = T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)(image_resized)
-        pixel_values = pixel_values.to(dtype=model_dtype, device=device)
+            # 预处理图像
+            image = images[i:i+1]
+            image_resized = T.Resize((448, 448), interpolation=InterpolationMode.BICUBIC)(image)
+            pixel_values = T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)(image_resized)
+            pixel_values = pixel_values.to(dtype=model_dtype, device=device)
 
-        # ！！！关键：用 InternVL 专用构建器 + 传 image_flags
-        input_ids, attention_mask, labels, image_flags = build_internvl_inputs(
-            question, answer, tokenizer, model, max_len=1024, num_patches=1
-        )
-        input_ids = input_ids.to(device)
-        attention_mask = attention_mask.to(device)
-        labels = labels.to(device)
-        image_flags = image_flags.to(device)
-
-        try:
-            model.train()  # 需要 loss
-            outputs = model(
-                pixel_values=pixel_values,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-                image_flags=image_flags,     # ！！！必须
-                output_hidden_states=False,
-                output_attentions=False,
-                return_dict=True
+            # ！！！关键：用 InternVL 专用构建器 + 传 image_flags
+            input_ids, attention_mask, labels, image_flags = build_internvl_inputs(
+                question, answer, tokenizer, model, max_len=1024, num_patches=1
             )
-            model.eval()
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            labels = labels.to(device)
+            image_flags = image_flags.to(device)
 
-            loss = outputs.loss
-            if loss is None or torch.isnan(loss):
-                # 手动 fallback（几乎不会再触发）
-                logits = outputs.logits
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                active = shift_labels.view(-1) != -100
-                if active.any():
-                    loss_fct = nn.CrossEntropyLoss()
-                    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1))[active],
-                                    shift_labels.view(-1)[active])
-                else:
-                    loss = torch.tensor(0.0, device=device, requires_grad=True)
+            try:
+                model.train()  # 需要 loss
+                outputs = model(
+                    pixel_values=pixel_values,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    image_flags=image_flags,     # ！！！必须
+                    output_hidden_states=False,
+                    output_attentions=False,
+                    return_dict=True
+                )
+                model.eval()
 
-            total_loss += loss
-            num_samples += 1
+                loss = outputs.loss
+                if print_debug:
+                    # 取监督段的 argmax 解码，便于观察模型输出
+                    with torch.no_grad():
+                        logits = outputs.logits  # [1, T, V]
+                        # 需要知道答案段起点 q_len
+                        # 重新计算 q_len（与上面一致）
+                        user_text = f"<image>\n{question}".strip()
+                        image_block = IMG_START_TOKEN + (IMG_CONTEXT_TOKEN * int(getattr(model, "num_image_token", 256))) + IMG_END_TOKEN
+                        user_with_visual = user_text.replace("<image>", image_block, 1)
+                        q_enc = tokenizer(user_with_visual, return_tensors='pt', padding=False, truncation=True, max_length=1024)
+                        q_len = q_enc["input_ids"].shape[1]
+                        pred_ids = logits.argmax(dim=-1)
+                        pred_text = tokenizer.decode(pred_ids[0][q_len:].tolist(), skip_special_tokens=True)
+                    # print(f"[NORMAL][{debug_prefix}] Q: {question}\n  GT: {answer}\n  Pred: {pred_text}\n  Loss: {loss.item():.4f}")
+                if loss is None or torch.isnan(loss):
+                    # 手动 fallback（几乎不会再触发）
+                    logits = outputs.logits
+                    shift_logits = logits[..., :-1, :].contiguous()
+                    shift_labels = labels[..., 1:].contiguous()
+                    active = shift_labels.view(-1) != -100
+                    if active.any():
+                        loss_fct = nn.CrossEntropyLoss()
+                        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1))[active],
+                                        shift_labels.view(-1)[active])
+                    else:
+                        loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-        except Exception as e:
-            print(f"警告: 正常任务损失计算出错: {e}")
-            continue
+                total_loss += loss
+                num_samples += 1
+
+            except Exception as e:
+                print(f"警告: 正常任务损失计算出错: {e}")
+                continue
 
     if num_samples == 0:
         return torch.tensor(0.01, device=device, requires_grad=True)
@@ -150,7 +165,7 @@ def compute_normal_task_loss(images, qa_pairs, tokenizer, model, device):
 
 
 
-def compute_privacy_task_loss(images, qa_pairs, tokenizer, model, device):
+def compute_privacy_task_loss(images, qa_pairs, tokenizer, model, device, print_debug=False, debug_prefix="", image_paths=None):
     total_loss, num_samples = 0.0, 0
     batch_size = images.shape[0]
     model_dtype = next(model.parameters()).dtype
@@ -159,55 +174,83 @@ def compute_privacy_task_loss(images, qa_pairs, tokenizer, model, device):
         qa_list = qa_pairs[i]
         if not qa_list:
             continue
-        qa = qa_list[np.random.randint(len(qa_list))]
-        question, answer = qa['question'], qa['answer']
+        
+        # 打印图像信息（如果需要调试）
+        if print_debug and image_paths:
+            img_name = image_paths[i].split('/')[-1] if '/' in image_paths[i] else image_paths[i]
+            print(f"\n{'='*60}")
+            print(f"[PRIVACY DEBUG][{debug_prefix}] Image {i} in batch: {img_name}")
+            print(f"Number of privacy QA pairs: {len(qa_list)}")
+            print(f"{'='*60}")
+        
+        # 遍历该图对应的所有隐私QA对（确保图和QA固定对应）
+        for qa_idx, qa in enumerate(qa_list):
+            question, answer = qa['question'], qa['answer']
+            
+            if print_debug:
+                print(f"\n[Privacy QA {qa_idx+1}/{len(qa_list)}]")
+                print(f"Question: {question[:200]}..." if len(question) > 200 else f"Question: {question}")
+                print(f"Expected Answer: {answer}")
 
-        image = images[i:i+1]
-        image_resized = T.Resize((448, 448), interpolation=InterpolationMode.BICUBIC)(image)
-        pixel_values = T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)(image_resized)
-        pixel_values = pixel_values.to(dtype=model_dtype, device=device)
+            image = images[i:i+1]
+            image_resized = T.Resize((448, 448), interpolation=InterpolationMode.BICUBIC)(image)
+            pixel_values = T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)(image_resized)
+            pixel_values = pixel_values.to(dtype=model_dtype, device=device)
 
-        input_ids, attention_mask, labels, image_flags = build_internvl_inputs(
-            question, answer, tokenizer, model, max_len=1024, num_patches=1
-        )
-        input_ids = input_ids.to(device)
-        attention_mask = attention_mask.to(device)
-        labels = labels.to(device)
-        image_flags = image_flags.to(device)
-
-        try:
-            model.train()
-            outputs = model(
-                pixel_values=pixel_values,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-                image_flags=image_flags,     # ！！！必须
-                output_hidden_states=False,
-                output_attentions=False,
-                return_dict=True
+            input_ids, attention_mask, labels, image_flags = build_internvl_inputs(
+                question, answer, tokenizer, model, max_len=1024, num_patches=1
             )
-            model.eval()
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            labels = labels.to(device)
+            image_flags = image_flags.to(device)
 
-            loss = outputs.loss
-            if loss is None or torch.isnan(loss):
-                logits = outputs.logits
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                active = shift_labels.view(-1) != -100
-                if active.any():
-                    loss_fct = nn.CrossEntropyLoss()
-                    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1))[active],
-                                    shift_labels.view(-1)[active])
-                else:
-                    loss = torch.tensor(0.0, device=device, requires_grad=True)
+            try:
+                model.train()
+                outputs = model(
+                    pixel_values=pixel_values,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    image_flags=image_flags,     # ！！！必须
+                    output_hidden_states=False,
+                    output_attentions=False,
+                    return_dict=True
+                )
+                model.eval()
 
-            total_loss -= loss  # 关键：最大化隐私损失
-            num_samples += 1
+                loss = outputs.loss
+                if print_debug:
+                    with torch.no_grad():
+                        logits = outputs.logits
+                        user_text = f"<image>\n{question}".strip()
+                        image_block = IMG_START_TOKEN + (IMG_CONTEXT_TOKEN * int(getattr(model, "num_image_token", 256))) + IMG_END_TOKEN
+                        user_with_visual = user_text.replace("<image>", image_block, 1)
+                        q_enc = tokenizer(user_with_visual, return_tensors='pt', padding=False, truncation=True, max_length=1024)
+                        q_len = q_enc["input_ids"].shape[1]
+                        pred_ids = logits.argmax(dim=-1)
+                        pred_text = tokenizer.decode(pred_ids[0][q_len:].tolist(), skip_special_tokens=True)
+                    print(f"Model Prediction: {pred_text}")
+                    print(f"Loss (original): {loss.item():.4f}, NegLoss: {-loss.item():.4f}")
+                    print(f"-" * 60)
+                if loss is None or torch.isnan(loss):
+                    logits = outputs.logits
+                    shift_logits = logits[..., :-1, :].contiguous()
+                    shift_labels = labels[..., 1:].contiguous()
+                    active = shift_labels.view(-1) != -100
+                    if active.any():
+                        loss_fct = nn.CrossEntropyLoss()
+                        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1))[active],
+                                        shift_labels.view(-1)[active])
+                    else:
+                        loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-        except Exception as e:
-            print(f"警告: 隐私任务损失计算出错: {e}")
-            continue
+                total_loss -= loss  # 关键：最大化隐私损失
+                num_samples += 1
+
+            except Exception as e:
+                print(f"警告: 隐私任务损失计算出错: {e}")
+                continue
 
     if num_samples == 0:
         return torch.tensor(0.0, device=device, requires_grad=True)
@@ -220,6 +263,10 @@ class AdversarialTrainer:
     def __init__(self, config):
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        # 调试打印控制（环境变量覆盖）
+        self.print_train_outputs = os.environ.get('PRINT_TRAIN_OUTPUTS', '1') == '1'
+        self.print_every = int(os.environ.get('PRINT_EVERY', '50'))
+        self.global_step = 0
         
         print(f"使用设备: {self.device}")
         
@@ -269,10 +316,11 @@ class AdversarialTrainer:
             'linf_norm': []
         }
     
-    def train_step(self, batch):
+    def train_step(self, batch, batch_idx):
         images = batch['images'].to(self.device)
         privacy_qa_list = batch['privacy_qa_list']
         normal_qa_list = batch['normal_qa_list']
+        image_paths = batch['image_paths']  # 获取图像路径
         
         # 生成对抗噪声
         delta = self.generator(images)
@@ -284,7 +332,9 @@ class AdversarialTrainer:
             normal_qa_list,
             self.tokenizer,
             self.model,
-            self.device
+            self.device,
+            # print_debug=(self.print_train_outputs and (self.global_step % self.print_every == 0)),
+            debug_prefix=f"step={self.global_step}"
         )
         
         # ============ 损失2: 隐私任务损失 (反向优化) ============
@@ -294,7 +344,10 @@ class AdversarialTrainer:
             privacy_qa_list,
             self.tokenizer,
             self.model,
-            self.device
+            self.device,
+            print_debug=(self.print_train_outputs and (self.global_step % self.print_every == 0)),
+            debug_prefix=f"step={self.global_step}",
+            image_paths=image_paths  # 传递图像路径
         )
         
         # ============ 总损失 ============
@@ -334,7 +387,7 @@ class AdversarialTrainer:
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{self.config.num_epochs}")
         
         for batch_idx, batch in enumerate(pbar):
-            metrics = self.train_step(batch)
+            metrics = self.train_step(batch, batch_idx)
             
             # 累加指标
             for key in epoch_metrics.keys():
@@ -348,6 +401,7 @@ class AdversarialTrainer:
                 'PSNR': f"{metrics['psnr']:.2f}",
                 'L_inf': f"{metrics['linf_norm']:.6f}"
             })
+            self.global_step += 1
         
         # 计算平均指标
         num_batches = len(dataloader)
@@ -420,6 +474,9 @@ class AdversarialTrainer:
 
 def main():
     """主函数"""
+
+    set_seed(42)
+
     # 加载配置
     config = Config()
     

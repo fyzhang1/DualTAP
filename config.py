@@ -8,21 +8,21 @@ class Config:
     image_size = 224  # 图像大小
     
     # 噪声约束
-    epsilon = 6.0 / 255.0  # L-infinity 范数约束
+    epsilon = 8.0 / 255.0
     
     # 训练相关配置
     batch_size = 2  # 降低以适应显存
-    num_epochs = 50
+    num_epochs = 21
     learning_rate = 1e-4
     
     # 损失函数权重
-    alpha = 3.0  # 正常任务损失权重（增大以保护正常功能）
-    beta = 1.0   # 隐私任务损失权重
+    alpha = 1.0  # 正常任务损失权重
+    beta = 2.0   # 隐私任务损失权重
     
     # 代理 MLLM 配置
     # surrogate_model_name = "llava-hf/llava-1.5-7b-hf"  # 或其他MLLM llava-1.5-7b-hf的效果差的跟屎一样
-    # lmms-lab/LLaVA-OneVision-1.5-8B-Instruct；Qwen/Qwen2.5-VL-7B-Instruct
-    surrogate_model_name = "OpenGVLab/InternVL2-1B"  
+    # lmms-lab/LLaVA-OneVision-1.5-8B-Instruct；Qwen/Qwen2.5-VL-7B-Instruct "OpenGVLab/InternVL2-1B"  
+    surrogate_model_name = "Qwen/Qwen2.5-VL-7B-Instruct"  
     
     # 保存相关
     checkpoint_dir = "./checkpoints"
@@ -38,4 +38,4 @@ class Config:
     eval_interval = 1  # 每N个epoch评估一次
     
     # 测试单个app
-    test_single_app = "email"  # 设置为None则使用所有app
+    test_single_app = None  # 设置为None则使用所有app
