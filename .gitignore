@@ -1,7 +1,12 @@
 /data/
 eval_results/*
 /checkpoints/
+/checkpoint_eot/
+/protect_images/
+/logs/
+/logs_eot/
 __pycache__/*checkpoints/
 *.pth
 *.pt
 *.ckpt
+

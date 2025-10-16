@@ -1,7 +1,7 @@
 import os
 import torch
 from torch.utils.data import DataLoader
-from transformers import AutoProcessor, AutoModelForVision2Seq, AutoModelForCausalLM
+from transformers import AutoProcessor, AutoTokenizer, AutoModelForCausalLM, AutoModel, LlavaOnevisionForConditionalGeneration, Qwen2_5_VLForConditionalGeneration
 from tqdm import tqdm
 import json
 from PIL import Image
@@ -17,7 +17,7 @@ from qwen_vl_utils import process_vision_info
 
 """
 python evaluate_baseline.py \
-  --output ./eval_results/eval_results_intern_baseline.json
+  --output ./eval_results/eval_results_qwen_baseline.json
 """
 
 class APIClient:
@@ -177,7 +177,7 @@ class BaselineEvaluator:
         
         # 初始化隐私指标计算器
         self.privacy_metrics = PrivacyMetrics()
-        
+        model_name = self.config.surrogate_model_name.lower()
         # 根据评估模式初始化
         if self.use_api:
             # 使用API模式
@@ -191,17 +191,58 @@ class BaselineEvaluator:
             self.processor = None
         else:
             # 使用本地模型模式
-            print(f"加载本地模型: {config.surrogate_model_name}")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                config.surrogate_model_name,
-                torch_dtype=torch.float16,
-                device_map="auto",
-                trust_remote_code=True
-            )
-            self.processor = AutoProcessor.from_pretrained(
-                config.surrogate_model_name,
-                trust_remote_code=True
-            )
+            if  "minicpm" in model_name.lower():
+                print(f"加载minicpm模型: {config.surrogate_model_name}")
+                self.model = AutoModel.from_pretrained(
+                    config.surrogate_model_name,
+                    attn_implementation='sdpa',
+                    torch_dtype=torch.bfloat16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+
+                self.processor = AutoTokenizer.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+            elif "llava" in model_name.lower():
+                print(f"加载LLaVA-OneVision模型: {config.surrogate_model_name}")
+                self.model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+                    config.surrogate_model_name,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                self.processor = AutoProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+            elif "qwen" in model_name.lower():
+                print(f"加载Qwen2-VL模型: {config.surrogate_model_name}")
+                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    config.surrogate_model_name,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                self.processor = AutoProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+
+            else:
+                print(f"加载本地模型: {config.surrogate_model_name}")
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    config.surrogate_model_name,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                self.processor = AutoProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+
             self.model.eval()
             self.api_client = None
     
@@ -219,6 +260,9 @@ class BaselineEvaluator:
         """
         # 转换为PIL图像
         image_pil = self._tensor_to_pil(image)
+        # 确保为RGB（MiniCPM官方要求）
+        if image_pil.mode != "RGB":
+            image_pil = image_pil.convert("RGB")
         
         if self.use_api:
             answer = self.api_client.query(image_pil, question)
@@ -300,6 +344,25 @@ class BaselineEvaluator:
                 )
                 
                 return answer
+        
+
+            
+            elif "minicpm" in model_name.lower():
+                # MiniCPM-V 使用专用的 chat 方法
+                # 根据官方示例：image和question都放在msgs的content中
+                msgs = [{'role': 'user', 'content': [image_pil, question]}]
+                
+                # MiniCPM-V-2_6 的 chat 方法
+                # 注意：image参数传None，图像在msgs中
+                answer = self.model.chat(
+                    image=None,
+                    msgs=msgs,
+                    tokenizer=self.processor,
+                    sampling=False,
+                    max_new_tokens=100
+                )
+                
+                return answer
             
             else:
                 # LLaVA 等其他模型
@@ -336,6 +399,9 @@ class BaselineEvaluator:
                 if "<image>" in answer:
                     answer = answer.split("<image>")[-1]
                 # 移除问题部分（如果在输出中）
+                answer = answer.strip()
+            elif "minicpm" in model_name:
+                # MiniCPM-V 输出已经是干净的，不需要额外清理
                 answer = answer.strip()
             else:
                 if "ASSISTANT:" in answer:

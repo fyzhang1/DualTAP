@@ -73,8 +73,8 @@ class PrivacyProtectionDataset(Dataset):
         if not os.path.exists(self.data_root):
             raise ValueError(f"数据根目录不存在: {self.data_root}")
         
-        # 遍历所有 app 目录
-        for app_name in os.listdir(self.data_root):
+        # 遍历所有 app 目录（排序，保证确定性）
+        for app_name in sorted(os.listdir(self.data_root)):
             # 如果指定了app_filter，只加载该app
             if self.app_filter and app_name != self.app_filter:
                 continue
@@ -104,9 +104,9 @@ class PrivacyProtectionDataset(Dataset):
             with open(normal_qa_path, 'r', encoding='utf-8') as f:
                 normal_qa = json.load(f)
             
-            # 构建数据项
+            # 构建数据项（按图像键排序，保证确定性）
             # 注意：JSON中的key是.jpg，但实际文件是.png
-            for img_key in privacy_qa.keys():
+            for img_key in sorted(privacy_qa.keys()):
                 # 尝试不同的文件扩展名
                 img_name_base = os.path.splitext(img_key)[0]
                 
@@ -139,13 +139,23 @@ class PrivacyProtectionDataset(Dataset):
                         'answer': answer_text
                     })
                 
-                # 正常QA: 将answers列表转换为文本
+                # 正常QA: 兼容 answers(list) 与 answer(str) 两种格式，统一为单个字符串
                 converted_normal_qa = []
                 for qa in normal_qa_list:
                     question = qa.get('question', '')
-                    answers = qa.get('answers', [])
-                    # 取第一个答案，或者将所有答案合并
-                    answer_text = answers[0] if len(answers) > 0 else ""
+                    answers_list = []
+                    if isinstance(qa.get('answers', None), list):
+                        answers_list = qa.get('answers', [])
+                    else:
+                        single = qa.get('answer', '')
+                        if isinstance(single, list):
+                            answers_list = single
+                        elif isinstance(single, str) and len(single) > 0:
+                            answers_list = [single]
+                        else:
+                            answers_list = []
+                    # 取第一个答案，或者为空字符串
+                    answer_text = answers_list[0] if len(answers_list) > 0 else ""
                     converted_normal_qa.append({
                         'question': question,
                         'answer': answer_text

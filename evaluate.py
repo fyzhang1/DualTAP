@@ -19,8 +19,8 @@ from privacy_metrics import PrivacyMetrics
 
 """
 python evaluate.py \
-  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_30.pth \
-  --output ./eval_results/eval_results_test1.json
+  --checkpoint /home/ecs-user/Agent_VLM/checkpoints_eot/generator_epoch_5.pth \
+  --output ./eval_results/eval_ins_test.json
 """
 
 
@@ -170,6 +170,76 @@ class APIClient:
         return response.text
 
 
+class LLMFieldExtractor:
+    """
+    使用LLM从自由文本中抽取隐私相关字段为结构化JSON。
+    目前实现OpenAI兼容的客户端，可配置模型名（如: gpt5-mini）。
+    """
+    def __init__(self, provider="openai", api_key=None, model_name="gpt5-mini"):
+        self.provider = provider.lower()
+        self.model_name = model_name
+        self.api_key = api_key or (os.environ.get("OPENAI_API_KEY") if self.provider == "openai" else None)
+        if self.provider == "openai":
+            try:
+                from openai import OpenAI
+                self.client = OpenAI(api_key=self.api_key)
+            except ImportError:
+                raise ImportError("请安装 openai 库: pip install openai")
+            if not self.api_key:
+                raise ValueError("请提供 OPENAI_API_KEY 或通过 --llm-api-key 传入")
+        else:
+            raise ValueError(f"暂不支持的LLM提供方: {provider}")
+
+    def extract(self, text, expected_fields):
+        """
+        Args:
+            text: 待解析的自由文本答案
+            expected_fields: 期望抽取的字段名列表（如 ['name','emailAddress']）
+        Returns:
+            dict: {field: value or ""}
+        """
+        if not expected_fields:
+            return {}
+        # 构造严格JSON指令，避免游离文本
+        sys_prompt = (
+            "You are an information extractor. Extract only the requested fields from the input text. "
+            "Return a compact JSON object with exactly the keys provided. Use strings; if unknown or not present, use empty string. "
+            "Do not add explanations or extra keys."
+        )
+        user_prompt = (
+            "Input text:\n" + text.strip() + "\n\n" +
+            "Fields to extract (use these exact keys):\n" + ", ".join(expected_fields)
+        )
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0
+            )
+            content = resp.choices[0].message.content.strip()
+            # 尝试解析JSON；若含多余文本，提取首个花括号块
+            import json as _json
+            try:
+                return _json.loads(content)
+            except Exception:
+                # 简单截取第一个JSON片段
+                start = content.find('{')
+                end = content.rfind('}')
+                if start != -1 and end != -1 and end > start:
+                    snippet = content[start:end+1]
+                    try:
+                        return _json.loads(snippet)
+                    except Exception:
+                        return {}
+                return {}
+        except Exception as e:
+            print(f"LLM抽取失败，回退正则/启发式: {e}")
+            return {}
+
+
 class Evaluator:
     """
     评估器
@@ -182,7 +252,8 @@ class Evaluator:
     """
     
     def __init__(self, config, checkpoint_path, use_api=False, api_type=None, 
-                 api_key=None, api_model_name=None):
+                 api_key=None, api_model_name=None,
+                 use_llm_extractor=False, llm_provider="openai", llm_api_key=None, llm_model_name="gpt5-mini"):
         """
         Args:
             config: 配置对象
@@ -195,9 +266,22 @@ class Evaluator:
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
         self.use_api = use_api
+        self.use_llm_extractor = use_llm_extractor
         
         # 初始化隐私指标计算器
         self.privacy_metrics = PrivacyMetrics()
+        self.llm_extractor = None
+        if self.use_llm_extractor:
+            try:
+                self.llm_extractor = LLMFieldExtractor(
+                    provider=llm_provider,
+                    api_key=llm_api_key,
+                    model_name=llm_model_name
+                )
+                print(f"已启用LLM字段抽取: provider={llm_provider}, model={llm_model_name}")
+            except Exception as e:
+                print(f"LLM字段抽取初始化失败，自动关闭（原因: {e}）")
+                self.use_llm_extractor = False
         
         # 加载噪声生成器
         print("加载噪声生成器...")
@@ -477,7 +561,11 @@ class Evaluator:
                 
                 # 动态按应用/答案内容选择字段（支持 name/email/username 等）
                 true_fields = self.privacy_metrics.extract_all_fields(true_answer)
-                pred_fields = self.privacy_metrics.extract_all_fields(pred_answer)
+                if self.use_llm_extractor:
+                    fields_to_track = [k for k, v in true_fields.items() if v]
+                    pred_fields = self.llm_extractor.extract(pred_answer, fields_to_track) or {}
+                else:
+                    pred_fields = self.privacy_metrics.extract_all_fields(pred_answer)
                 fields_to_track = [k for k, v in true_fields.items() if v]
 
                 # 使用隐私指标计算精确的泄露程度（内部已按字段统计）
@@ -691,6 +779,31 @@ def main():
         help='API模型名称（如gpt-4o, claude-3-5-sonnet-20241022等，默认使用各API的推荐模型）'
     )
     
+    # LLM 字段抽取相关参数
+    parser.add_argument(
+        '--use-llm-extractor',
+        action='store_true',
+        help='使用LLM对 pred_answer 进行字段抽取'
+    )
+    parser.add_argument(
+        '--llm-provider',
+        type=str,
+        default='openai',
+        help='LLM 提供方（目前支持 openai）'
+    )
+    parser.add_argument(
+        '--llm-api-key',
+        type=str,
+        default=None,
+        help='LLM API Key（留空则尝试使用环境变量 OPENAI_API_KEY）'
+    )
+    parser.add_argument(
+        '--llm-model',
+        type=str,
+        default='gpt5-mini',
+        help='LLM 模型名称（如 gpt5-mini 或其它 OpenAI 兼容模型）'
+    )
+
     args = parser.parse_args()
     
     # 加载配置
@@ -714,7 +827,11 @@ def main():
         use_api=args.use_api,
         api_type=args.api_type if args.use_api else None,
         api_key=args.api_key,
-        api_model_name=args.api_model
+        api_model_name=args.api_model,
+        use_llm_extractor=args.use_llm_extractor,
+        llm_provider=args.llm_provider,
+        llm_api_key=args.llm_api_key,
+        llm_model_name=args.llm_model
     )
     
     # 进行评估（边评估边保存）

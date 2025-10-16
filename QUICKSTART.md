@@ -269,9 +269,9 @@ python evaluate.py \
 
 ```bash
 python inference.py \
-  --image /home/ecs-user/Agent_VLM/data/amazon/images/amazon_0.png \
-  --checkpoint /home/ecs-user/Agent_VLM/checkpoints/generator_epoch_21.pth \
-  --output protected_image_amazon.jpg
+  --image /home/ecs-user/Agent_VLM/data/tiktok/images/tiktok_500.png \
+  --checkpoint /home/ecs-user/Agent_VLM/checkpoints_eot/generator_epoch_5.pth \
+  --output ./protect_images/protected_image_tiktok_500_attn_eot.jpg
 ```
 
 输出：
