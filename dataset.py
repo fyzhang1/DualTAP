@@ -15,17 +15,21 @@ class PrivacyProtectionDataset(Dataset):
     - normal_qa.json：answers 是列表格式
     """
     
-    def __init__(self, data_root, image_size=224, transform=None, app_filter=None):
+    def __init__(self, data_root, image_size=224, transform=None, app_filter=None, split='all', split_ratio=0.8):
         """
         Args:
             data_root: 数据根目录
             image_size: 图像尺寸
             transform: 图像变换
             app_filter: 只加载指定的app，例如 "amazon"
+            split: 数据划分，'train' | 'eval' | 'all'，按每个 app 进行划分
+            split_ratio: 训练集比例（例如 0.8 表示 4:1 划分）
         """
         self.data_root = data_root
         self.image_size = image_size
         self.app_filter = app_filter
+        self.split = split
+        self.split_ratio = float(split_ratio) if split_ratio is not None else 0.8
         
         # 默认的图像变换
         if transform is None:
@@ -104,8 +108,9 @@ class PrivacyProtectionDataset(Dataset):
             with open(normal_qa_path, 'r', encoding='utf-8') as f:
                 normal_qa = json.load(f)
             
-            # 构建数据项（按图像键排序，保证确定性）
+            # 为当前 app 构建数据项（按图像键排序，保证确定性）
             # 注意：JSON中的key是.jpg，但实际文件是.png
+            app_items = []
             for img_key in sorted(privacy_qa.keys()):
                 # 尝试不同的文件扩展名
                 img_name_base = os.path.splitext(img_key)[0]
@@ -165,16 +170,28 @@ class PrivacyProtectionDataset(Dataset):
                     print(f"警告: {img_key} 缺少 QA 对，跳过")
                     continue
                 
-                self.data_items.append({
+                app_items.append({
                     'app_name': app_name,
                     'image_path': img_path,
                     'privacy_qa': converted_privacy_qa,
                     'normal_qa': converted_normal_qa
                 })
+
+            # 按每个 app 进行 4:1 划分（默认 0.8 训练 / 0.2 评估）
+            if len(app_items) > 0:
+                num_train = int(len(app_items) * self.split_ratio)
+                if self.split == 'train':
+                    self.data_items.extend(app_items[:num_train])
+                elif self.split == 'eval':
+                    self.data_items.extend(app_items[num_train:])
+                else:  # 'all'
+                    self.data_items.extend(app_items)
         
         print(f"成功加载 {len(self.data_items)} 个数据项")
         if self.app_filter:
             print(f"仅加载应用: {self.app_filter}")
+        if self.split in ('train', 'eval'):
+            print(f"使用数据划分: split={self.split}, train_ratio={self.split_ratio}")
     
     def __len__(self):
         return len(self.data_items)

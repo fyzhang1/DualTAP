@@ -5,6 +5,53 @@
 import torch
 import numpy as np
 from PIL import Image
+from typing import Tuple, Dict, Optional
+
+_bert_scorer = None
+_st_model = None
+_rouge = None
+_sacrebleu = None
+
+def _lazy_import_bert_scorer():
+    global _bert_scorer
+    if _bert_scorer is None:
+        try:
+            from bert_score import BERTScorer  # type: ignore
+            # Use a multilingual small model by default for speed; caller can override if needed
+            _bert_scorer = BERTScorer(lang="en", model_type="microsoft/deberta-base-mnli", rescale_with_baseline=True)
+        except Exception:
+            _bert_scorer = False  # sentinel for unavailable
+    return _bert_scorer
+
+def _lazy_import_st_model():
+    global _st_model
+    if _st_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer  # type: ignore
+            _st_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        except Exception:
+            _st_model = False
+    return _st_model
+
+def _lazy_import_rouge():
+    global _rouge
+    if _rouge is None:
+        try:
+            from rouge_score import rouge_scorer  # type: ignore
+            _rouge = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
+        except Exception:
+            _rouge = False
+    return _rouge
+
+def _lazy_import_sacrebleu():
+    global _sacrebleu
+    if _sacrebleu is None:
+        try:
+            import sacrebleu  # type: ignore
+            _sacrebleu = sacrebleu
+        except Exception:
+            _sacrebleu = False
+    return _sacrebleu
 
 
 def tensor_to_numpy(tensor):
@@ -75,6 +122,79 @@ def visualize_noise(noise, scale=10.0):
     from torchvision.transforms import ToPILImage
     to_pil = ToPILImage()
     return to_pil(noise_vis)
+
+
+def compute_text_metrics(pred_text: str, true_text: str) -> Dict[str, Optional[float]]:
+    """
+    Compute text similarity metrics between predicted and true strings.
+    Returns a dict with keys: bertscore_f1, cosine_sim, bleu, rouge_l.
+    Missing backends will yield None for the corresponding metric.
+    """
+    pred = (pred_text or "").strip()
+    ref = (true_text or "").strip()
+    if not pred or not ref:
+        return {
+            "bertscore_f1": 0.0 if pred or ref else None,
+            "cosine_sim": 0.0 if pred or ref else None,
+            "bleu": 0.0 if pred or ref else None,
+            "rouge_l": 0.0 if pred or ref else None,
+        }
+
+    # BERTScore
+    bert_f1: Optional[float]
+    scorer = _lazy_import_bert_scorer()
+    if scorer is False:
+        bert_f1 = None
+    else:
+        try:
+            P, R, F1 = scorer.score([pred], [ref])  # tensors
+            bert_f1 = float(F1.mean().item())
+        except Exception:
+            bert_f1 = None
+
+    # Cosine similarity via sentence-transformers
+    cosine_sim: Optional[float]
+    st = _lazy_import_st_model()
+    if st is False:
+        cosine_sim = None
+    else:
+        try:
+            import numpy as _np  # local alias
+            pred_emb = st.encode([pred], normalize_embeddings=True)
+            ref_emb = st.encode([ref], normalize_embeddings=True)
+            cosine_sim = float((_np.asarray(pred_emb) @ _np.asarray(ref_emb).T).item())
+        except Exception:
+            cosine_sim = None
+
+    # BLEU via sacrebleu (sentence-level)
+    bleu: Optional[float]
+    sb = _lazy_import_sacrebleu()
+    if sb is False:
+        bleu = None
+    else:
+        try:
+            bleu = float(sb.sentence_bleu(pred, [ref]).score / 100.0)
+        except Exception:
+            bleu = None
+
+    # ROUGE-L via rouge-score
+    rouge_l: Optional[float]
+    rs = _lazy_import_rouge()
+    if rs is False:
+        rouge_l = None
+    else:
+        try:
+            scores = rs.score(ref, pred)
+            rouge_l = float(scores["rougeL"].fmeasure)
+        except Exception:
+            rouge_l = None
+
+    return {
+        "bertscore_f1": bert_f1,
+        "cosine_sim": cosine_sim,
+        "bleu": bleu,
+        "rouge_l": rouge_l,
+    }
 
 
 def create_data_template():

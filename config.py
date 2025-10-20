@@ -6,6 +6,8 @@ class Config:
     # 数据相关配置
     data_root = "./data"  # 数据根目录
     image_size = 448  # 图像大小
+    # 按每个 app 进行数据划分比例（4:1 -> 0.8）
+    train_split_ratio = 0.0
     
     # 噪声约束
     epsilon = 128.0 / 255.0
@@ -36,7 +38,7 @@ class Config:
     # 注意力整形参数（用于生成器侧）
     attn_gamma = 2.0           # >1 提升热点对比度，增大以提高区分度
     attn_threshold = 0.75      # >0 时按阈值二值化，范围 [0,1] - 提高阈值
-    attn_topk_percent = 60    # >0 时按比例保留前 k%（0~100），优先于阈值 - 大幅降低
+    attn_topk_percent = 30    # >0 时按比例保留前 k%（0~100），优先于阈值 - 大幅降低
     attn_mix = 0.9             # 与全局权重混合：m*attn + (1-m)
     # 注意力扩张与重归一
     attn_dilate_kernel = 3     # 3/5 进行邻域扩张；1 表示不扩张 - 禁用膨胀

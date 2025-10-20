@@ -469,7 +469,9 @@ def main():
     dataset = PrivacyProtectionDataset(
         data_root=config.data_root,
         image_size=config.image_size,
-        app_filter=config.test_single_app   )
+        app_filter=config.test_single_app,
+        split='train',
+        split_ratio=getattr(config, 'train_split_ratio', 0.8)   )
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,

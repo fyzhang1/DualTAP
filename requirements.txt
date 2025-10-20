@@ -15,3 +15,9 @@ rapidfuzz>=3.0.0  # 模糊匹配（用于隐私指标计算）
 openai>=1.0.0  # OpenAI GPT-4V等
 anthropic>=0.18.0  # Claude
 google-generativeai>=0.3.0  # Gemini
+
+# 文本度量
+bert-score>=0.3.13
+sentence-transformers>=2.2.2
+rouge-score>=0.1.2
+sacrebleu>=2.4.0

@@ -5,6 +5,7 @@ eval_results/*
 /protect_images/
 /logs/
 /logs_eot/
+/baseline_images/
 __pycache__/*checkpoints/
 *.pth
 *.pt
