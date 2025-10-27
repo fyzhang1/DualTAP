@@ -138,11 +138,11 @@ class SaliencyAttention:
         denom = saliency.amax(dim=(-2, -1), keepdim=True) + 1e-8
         saliency = saliency / denom
         
-        # 【改进1】使用更小的核或去掉高斯模糊，减少扩散
+        # 使用更小的核或去掉高斯模糊，减少扩散
         # saliency = TF.gaussian_blur(saliency, kernel_size=[5, 5], sigma=1.0)  # 原始
         saliency = TF.gaussian_blur(saliency, kernel_size=[3, 3], sigma=0.5)  # 更小的核
         
-        # 【改进2】锐化处理：提升高值区域，抑制低值区域
+
         if getattr(self, 'sharpening_strength', 0.0) > 0.0:
             # 使用分位数拉伸
             quantile_50 = torch.quantile(saliency.flatten(), 0.5)
@@ -464,6 +464,7 @@ class SaliencyAttention:
                 self.method = prev_method
                 # Contrastive diff with ReLU and renormalize
                 attn = (attn_priv - attn_norm).clamp(min=0.0)
+                # attn = (attn_priv).clamp(min=0.0)
                 # avoid all-zero
                 if float(attn.max()) > 0:
                     attn = attn / (attn.amax(dim=(-2, -1), keepdim=True) + 1e-8)

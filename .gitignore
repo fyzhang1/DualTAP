@@ -6,6 +6,9 @@ eval_results/*
 /logs/
 /logs_eot/
 /baseline_images/
+/real/
+/plus/
+/attention_diagnosis/
 __pycache__/*checkpoints/
 *.pth
 *.pt

@@ -2,6 +2,8 @@
 工具函数
 """
 
+import os
+import time
 import torch
 import numpy as np
 from PIL import Image
@@ -11,6 +13,9 @@ _bert_scorer = None
 _st_model = None
 _rouge = None
 _sacrebleu = None
+
+# Optional deps
+_psutil = None
 
 def _lazy_import_bert_scorer():
     global _bert_scorer
@@ -52,6 +57,17 @@ def _lazy_import_sacrebleu():
         except Exception:
             _sacrebleu = False
     return _sacrebleu
+
+
+def _lazy_import_psutil():
+    global _psutil
+    if _psutil is None:
+        try:
+            import psutil  # type: ignore
+            _psutil = psutil
+        except Exception:
+            _psutil = False
+    return _psutil
 
 
 def tensor_to_numpy(tensor):
@@ -195,6 +211,72 @@ def compute_text_metrics(pred_text: str, true_text: str) -> Dict[str, Optional[f
         "bleu": bleu,
         "rouge_l": rouge_l,
     }
+
+
+class Timer:
+    """Simple context timer returning elapsed milliseconds in .ms."""
+    def __enter__(self):
+        self._start = time.perf_counter()
+        self.ms = 0.0
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.ms = (time.perf_counter() - self._start) * 1000.0
+
+
+def get_cpu_memory_mb() -> Optional[float]:
+    """
+    Return current process RSS in MB if possible. Falls back gracefully.
+    """
+    psutil = _lazy_import_psutil()
+    try:
+        if psutil and psutil is not False:
+            process = psutil.Process(os.getpid())
+            rss = float(process.memory_info().rss) / (1024.0 * 1024.0)
+            return rss
+    except Exception:
+        pass
+    try:
+        import resource  # type: ignore
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        # On Linux, ru_maxrss is in kilobytes
+        rss_mb = float(getattr(usage, "ru_maxrss", 0.0)) / 1024.0
+        return rss_mb
+    except Exception:
+        return None
+
+
+def get_cuda_memory_stats(device=None) -> Dict[str, Optional[float]]:
+    """
+    Return CUDA memory stats in MB: current_allocated, current_reserved, max_allocated, max_reserved.
+    If CUDA not available, values are None.
+    """
+    if not torch.cuda.is_available():
+        return {
+            "current_allocated_mb": None,
+            "current_reserved_mb": None,
+            "max_allocated_mb": None,
+            "max_reserved_mb": None,
+        }
+    try:
+        dev = device if device is not None else torch.device("cuda")
+        allocated = torch.cuda.memory_allocated(dev) / (1024.0 * 1024.0)
+        reserved = torch.cuda.memory_reserved(dev) / (1024.0 * 1024.0)
+        max_alloc = torch.cuda.max_memory_allocated(dev) / (1024.0 * 1024.0)
+        max_res = torch.cuda.max_memory_reserved(dev) / (1024.0 * 1024.0)
+        return {
+            "current_allocated_mb": float(allocated),
+            "current_reserved_mb": float(reserved),
+            "max_allocated_mb": float(max_alloc),
+            "max_reserved_mb": float(max_res),
+        }
+    except Exception:
+        return {
+            "current_allocated_mb": None,
+            "current_reserved_mb": None,
+            "max_allocated_mb": None,
+            "max_reserved_mb": None,
+        }
 
 
 def create_data_template():

@@ -11,6 +11,9 @@ from transformers import AutoModel, AutoTokenizer
 import torchvision.transforms.functional as F
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
+import torchvision.utils as vutils
+import matplotlib.pyplot as plt
+import numpy as np
 
 from config import Config
 from dataset import PrivacyProtectionDataset, collate_fn
@@ -244,6 +247,103 @@ class EoTTransforms(nn.Module):
         return torch.stack(transformed_list, dim=0).to(device=device, dtype=dtype)
 
 
+def save_training_visualization(images, attention_map, delta, x_adv, save_path, 
+                                app_names=None, epoch=0, batch_idx=0, max_samples=4):
+    """
+    保存训练过程中的可视化图像
+    Args:
+        images: 原始图像 [B,3,H,W]
+        attention_map: 注意力图 [B,1,H,W] 或 [B,3,H,W]
+        delta: 生成的噪声 [B,3,H,W]
+        x_adv: 加噪后的图像 [B,3,H,W]
+        save_path: 保存路径
+        app_names: 应用名称列表
+        epoch: 当前epoch
+        batch_idx: 当前batch索引
+        max_samples: 最多保存几个样本
+    """
+    batch_size = min(images.shape[0], max_samples)
+    
+    fig, axes = plt.subplots(batch_size, 5, figsize=(20, 4*batch_size))
+    if batch_size == 1:
+        axes = axes.reshape(1, -1)
+    
+    for i in range(batch_size):
+        # 转换为numpy用于可视化（先detach再转换）
+        img_np = images[i].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
+        
+        # 注意力图（取第一个通道或平均）
+        if attention_map is not None:
+            if attention_map.shape[1] == 1:
+                attn_np = attention_map[i, 0].detach().cpu().numpy()
+            else:
+                attn_np = attention_map[i].detach().cpu().mean(dim=0).numpy()
+        else:
+            attn_np = np.zeros_like(img_np[:,:,0])
+        
+        # 噪声（取绝对值和平均）
+        # delta_raw = delta[i].detach().cpu().permute(1, 2, 0).numpy()  # [H,W,3]
+        delta_np = delta[i].detach().cpu().abs().mean(dim=0).numpy()
+        # delta_np = (delta_raw * 10.0 + 0.5).clip(0, 1)
+        
+        # 加噪后的图像
+        x_adv_np = x_adv[i].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
+        
+        # 差异图（放大10倍以便观察）
+        diff_np = (x_adv_np - img_np).mean(axis=2)
+        diff_np = (diff_np - diff_np.min()) / (diff_np.max() - diff_np.min() + 1e-8)
+        
+        # 绘制子图
+        axes[i, 0].imshow(img_np)
+        axes[i, 0].set_title(f'Original\n{app_names[i] if app_names else ""}', fontsize=10)
+        axes[i, 0].axis('off')
+        
+        im1 = axes[i, 1].imshow(attn_np, cmap='jet', vmin=0, vmax=1)
+        axes[i, 1].set_title(f'Attention Map\nmax={attn_np.max():.3f}', fontsize=10)
+        axes[i, 1].axis('off')
+        plt.colorbar(im1, ax=axes[i, 1], fraction=0.046, pad=0.04)
+        
+        im2 = axes[i, 2].imshow(delta_np, cmap='gray', vmin=0, vmax=Config.epsilon)
+        axes[i, 2].set_title(f'Noise\nL∞={delta_np.max():.4f}', fontsize=10)
+        axes[i, 2].axis('off')
+        plt.colorbar(im2, ax=axes[i, 2], fraction=0.046, pad=0.04)
+        
+        axes[i, 3].imshow(x_adv_np)
+        axes[i, 3].set_title('Adversarial\n(with noise)', fontsize=10)
+        axes[i, 3].axis('off')
+        
+        im4 = axes[i, 4].imshow(diff_np, cmap='hot')
+        axes[i, 4].set_title('Difference\n(amplified)', fontsize=10)
+        axes[i, 4].axis('off')
+        plt.colorbar(im4, ax=axes[i, 4], fraction=0.046, pad=0.04)
+    
+    plt.suptitle(f'Training Visualization - Epoch {epoch}, Batch {batch_idx}', 
+                 fontsize=14, y=0.995)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def save_noise_only(delta, save_path, epoch=0, batch_idx=0, max_samples=8):
+    """
+    仅保存噪声幅值图（灰度），不包含原图/注意力/差异图。
+    Args:
+        delta: Tensor [B,3,H,W]
+        save_path: 输出路径
+        epoch, batch_idx: 仅用于命名/日志
+        max_samples: 最多可视化的样本数
+    """
+    try:
+        b = min(delta.shape[0], max_samples)
+        # 用每像素的 |delta| 平均作为可视化（单通道）
+        noise_map = delta[:b].detach().cpu().abs().mean(dim=1, keepdim=True)  # [b,1,H,W]
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # 使用 torchvision 保存网格，normalize=True 做 min-max 归一化便于观察
+        nrow = min(4, b)
+        vutils.save_image(noise_map, save_path, nrow=nrow, normalize=True)
+    except Exception as e:
+        print(f"警告: 保存纯噪声可视化失败: {e}")
+
 class AdversarialTrainerEoT:
     def __init__(self, config):
         self.config = config
@@ -259,6 +359,10 @@ class AdversarialTrainerEoT:
         self.checkpoint_dir = getattr(config, 'checkpoint_dir_eot', "./checkpoints_eot")
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        
+        # 可视化保存目录
+        self.vis_dir = os.path.join(self.log_dir, "test_64")
+        os.makedirs(self.vis_dir, exist_ok=True)
 
         print(f"使用设备: {self.device}")
         print(f"EoT 样本数: {self.eot_samples}")
@@ -291,17 +395,25 @@ class AdversarialTrainerEoT:
             attn_mix=getattr(config, 'attn_mix', 1.0),
             attn_dilate_kernel=getattr(config, 'attn_dilate_kernel', 1),
             attn_renorm=getattr(config, 'attn_renorm', False),
-            attn_as_epsilon=getattr(config, 'attn_as_epsilon', True)
+            attn_as_epsilon=getattr(config, 'attn_as_epsilon', False),
+            attn_integration=getattr(config, 'attn_integration', 'film'),
+            film_hidden=getattr(config, 'film_hidden', 32),
+            film_strength=getattr(config, 'film_strength', 1.0),
+            noise_center_dc=getattr(config, 'noise_center_dc', True),
+            noise_balance_by_std=getattr(config, 'noise_balance_by_std', True),
+            output_gate_with_attention=getattr(config, 'output_gate_with_attention', True),
         ).to(self.device)
 
         # 注意力提取器（用于隐私任务显著图）
-        self.attn_extractor = SaliencyAttention(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            device=self.device,
-            save_dir=(self.config.attention_dir if getattr(self.config, 'save_attention', False) else None),
-            method=getattr(self.config, 'attn_method', 'xattn_grad')
-        )
+        self.attn_extractor = None
+        if getattr(self.config, 'use_attention', True):
+            self.attn_extractor = SaliencyAttention(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                device=self.device,
+                save_dir=(self.config.attention_dir if getattr(self.config, 'save_attention', False) else None),
+                method=getattr(self.config, 'attn_method', 'xattn_grad')
+            )
 
         self.optimizer = optim.Adam(
             self.generator.parameters(),
@@ -317,25 +429,46 @@ class AdversarialTrainerEoT:
             'linf_norm': []
         }
 
-    def train_step(self, batch, batch_idx):
+    def train_step(self, batch, batch_idx, epoch=0, save_vis=False):
         images = batch['images'].to(self.device)
         privacy_qa_list = batch['privacy_qa_list']
         normal_qa_list = batch['normal_qa_list']
+        app_names = batch.get('app_names', None)
 
-        # 计算隐私相关注意力图（对比注意力可选）：
-        # 若 method 包含 'contrast'，则传入 normal_qa_list 进行 Att_priv - Att_norm
-        with torch.enable_grad():
-            attention_map = self.attn_extractor.get_attention_map(images, privacy_qa_list, normal_qa_list)
+        # 计算隐私相关注意力图（可选）
+        if getattr(self.config, 'use_attention', True) and self.attn_extractor is not None:
+            with torch.enable_grad():
+                attention_map = self.attn_extractor.get_attention_map(images, privacy_qa_list, normal_qa_list)
+        else:
+            attention_map = None
         
-        # 生成扰动（用注意力图进行空间加权）
-        delta = self.generator(images, attention_map=attention_map)
-        x_adv = torch.clamp(images + delta, 0.0, 1.0)
+        delta  = self.generator(images, attention_map=attention_map)
+        x_adv = images + delta
+        x_adv = torch.clamp(x_adv, 0.0, 1.0)        
+        # 保存可视化（如果需要）
+        if save_vis:
+            if getattr(self.config, 'vis_noise_only', False):
+                    vis_path = os.path.join(self.vis_dir, f"epoch_{epoch:03d}_batch_{batch_idx:04d}_noise.png")
+                    save_noise_only(delta, vis_path, epoch=epoch, batch_idx=batch_idx)
+            else:
+                vis_path = os.path.join(self.vis_dir, f"epoch_{epoch:03d}_batch_{batch_idx:04d}.png")
+                try:
+                        print("save_training_visualization")
+                        save_training_visualization(
+                            images, attention_map, delta, x_adv, 
+                            vis_path, app_names, epoch, batch_idx
+                        )
+                except Exception as e:
+                        print(f"警告: 保存可视化失败: {e}")
 
-        # 额外正则：非注意力区域噪声惩罚与 TV 平滑
-        shaped_for_loss = self.generator.shape_attention_map(attention_map, target_size=delta.shape[-2:], out_channels=1)
-        out_mask = (1.0 - shaped_for_loss).clamp(0.0, 1.0)
-        out_mask = out_mask.repeat(1, delta.shape[1], 1, 1)
-        outside_loss = (out_mask * delta).pow(2).mean()
+        # 额外正则：非注意力区域噪声惩罚与 TV 平滑（仅在使用注意力时启用 outside_loss）
+        if attention_map is not None and getattr(self.config, 'noise_outside_weight', 0.0) > 0.0:
+            shaped_for_loss = self.generator.shape_attention_map(attention_map, target_size=delta.shape[-2:], out_channels=1)
+            out_mask = (1.0 - shaped_for_loss).clamp(0.0, 1.0)
+            out_mask = out_mask.repeat(1, delta.shape[1], 1, 1)
+            outside_loss = (out_mask * delta).pow(2).mean()
+        else:
+            outside_loss = torch.tensor(0.0, device=self.device, dtype=delta.dtype)
         tv_h = (delta[:, :, 1:, :] - delta[:, :, :-1, :]).abs().mean()
         tv_w = (delta[:, :, :, 1:] - delta[:, :, :, :-1]).abs().mean()
         tv_loss = tv_h + tv_w
@@ -354,10 +487,7 @@ class AdversarialTrainerEoT:
             )
         loss_privacy = loss_privacy_accum / self.eot_samples
         loss_total = self.config.alpha * loss_normal + self.config.beta * loss_privacy
-        loss_total = loss_total \
-            + getattr(self.config, 'noise_outside_weight', 0.0) * outside_loss \
-            + getattr(self.config, 'tv_weight', 0.0) * tv_loss
-
+        loss_total = loss_total 
         self.optimizer.zero_grad()
         loss_total.backward()
         self.optimizer.step()
@@ -383,9 +513,16 @@ class AdversarialTrainerEoT:
             'linf_norm': 0.0
         }
 
+        # 可视化保存频率：每N个batch保存一次
+        vis_interval = getattr(self.config, 'vis_interval', 10)
+        
         pbar = tqdm(dataloader, desc=f"EoT Epoch {epoch}/{self.config.num_epochs}")
         for batch_idx, batch in enumerate(pbar):
-            metrics = self.train_step(batch, batch_idx)
+            # 决定是否保存可视化
+            save_vis = (batch_idx % vis_interval == 0) or (batch_idx == 0)
+            
+            metrics = self.train_step(batch, batch_idx, epoch=epoch, save_vis=save_vis)
+            
             for key in epoch_metrics.keys():
                 epoch_metrics[key] += metrics[key]
             pbar.set_postfix({
@@ -395,6 +532,10 @@ class AdversarialTrainerEoT:
                 'PSNR': f"{metrics['psnr']:.2f}",
                 'L_inf': f"{metrics['linf_norm']:.6f}"
             })
+            
+            if save_vis:
+                pbar.write(f"  → 已保存可视化: epoch_{epoch:03d}_batch_{batch_idx:04d}.png")
+            
             self.global_step += 1
 
         num_batches = len(dataloader)

@@ -1,9 +1,12 @@
 import os
 import string
 import re
+import base64
+from io import BytesIO
 import torch
 from torch.utils.data import DataLoader
-from transformers import AutoProcessor, AutoTokenizer, AutoModelForCausalLM, AutoModel, LlavaOnevisionForConditionalGeneration, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, AutoTokenizer, AutoModelForCausalLM, AutoModel, LlavaOnevisionForConditionalGeneration, Qwen2_5_VLForConditionalGeneration, Qwen2VLForConditionalGeneration, AutoImageProcessor, AutoModelForImageTextToText
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from tqdm import tqdm
 import json
 from PIL import Image
@@ -124,7 +127,19 @@ class SimpleBaselineEvaluator:
         else:
             # 加载本地MLLM模型
             model_name = self.config.surrogate_model_name.lower()
-            if "minicpm" in model_name:
+            if ("holo" in model_name) or ("hcompany" in model_name):
+                print(f"加载Holo模型: {config.surrogate_model_name}")
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    config.surrogate_model_name,
+                    dtype=torch.bfloat16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                self.processor = AutoProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+            elif "minicpm" in model_name:
                 print(f"加载MiniCPM模型: {config.surrogate_model_name}")
                 self.model = AutoModel.from_pretrained(
                     config.surrogate_model_name,
@@ -149,14 +164,22 @@ class SimpleBaselineEvaluator:
                     config.surrogate_model_name,
                     trust_remote_code=True
                 )
-            elif "qwen" in model_name:
-                print(f"加载Qwen2-VL模型: {config.surrogate_model_name}")
-                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    config.surrogate_model_name,
-                    torch_dtype=torch.float16,
-                    device_map="auto",
-                    trust_remote_code=True
-                )
+            elif "qwen" in model_name or "tars" in model_name:
+                print(f"加载Qwen家族模型: {config.surrogate_model_name}")
+                if "2.5" in model_name:
+                    self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                        config.surrogate_model_name,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True
+                    )
+                else:
+                    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                        config.surrogate_model_name,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True
+                    )
                 self.processor = AutoProcessor.from_pretrained(
                     config.surrogate_model_name,
                     trust_remote_code=True
@@ -170,6 +193,24 @@ class SimpleBaselineEvaluator:
                     trust_remote_code=True
                 )
                 self.processor = AutoTokenizer.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+            elif "opencua" in model_name:
+                print(f"加载OpenCUA模型: {config.surrogate_model_name}")
+                self.model = AutoModel.from_pretrained(
+                    config.surrogate_model_name,
+                    torch_dtype="auto",
+                    attn_implementation='eager',
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                self.processor = AutoTokenizer.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+                # OpenCUA 需要单独的图像处理器
+                self.image_processor = AutoImageProcessor.from_pretrained(
                     config.surrogate_model_name,
                     trust_remote_code=True
                 )
@@ -327,7 +368,7 @@ class SimpleBaselineEvaluator:
                 return_tensors="pt"
             ).to(self.device)
         
-        elif "qwen" in model_name:
+        elif "qwen" in model_name or "tars" in model_name:
             # Qwen2-VL 格式
             messages = [{
                 "role": "user",
@@ -347,6 +388,37 @@ class SimpleBaselineEvaluator:
                 padding=True,
                 return_tensors="pt"
             ).to(self.device)
+        elif ("holo" in model_name) or ("hcompany" in model_name):
+            # Holo: smart resize and standard chat template
+            if image_pil.mode != "RGB":
+                image_pil = image_pil.convert("RGB")
+            cfg = getattr(self.processor, "image_processor", None)
+            if cfg is not None:
+                resized_h, resized_w = smart_resize(
+                    image_pil.height,
+                    image_pil.width,
+                    factor=cfg.patch_size * cfg.merge_size,
+                    min_pixels=cfg.min_pixels,
+                    max_pixels=cfg.max_pixels,
+                )
+                resampling = getattr(Image, "Resampling", Image).LANCZOS
+                processed_image = image_pil.resize((resized_w, resized_h), resample=resampling)
+            else:
+                processed_image = image_pil
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": processed_image},
+                    {"type": "text", "text": question},
+                ],
+            }]
+            text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor(
+                text=[text],
+                images=[processed_image],
+                padding=True,
+                return_tensors="pt",
+            ).to(self.model.device)
         
         elif "internvl" in model_name:
             # InternVL2: 问题前需包含 "<image>\n" 模板
@@ -389,6 +461,51 @@ class SimpleBaselineEvaluator:
             )
             
             return answer
+        elif "opencua" in model_name:
+            # OpenCUA 推理：使用 chat template + image_processor.preprocess
+            def _encode_pil_to_base64_png(img: Image.Image) -> str:
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                return base64.b64encode(buf.getvalue()).decode()
+
+            data_uri = f"data:image/png;base64,{_encode_pil_to_base64_png(image_pil)}"
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": data_uri},
+                        {"type": "text", "text": question},
+                    ],
+                }
+            ]
+
+            input_ids_list = self.processor.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=True
+            )
+            input_ids = torch.tensor([input_ids_list], dtype=torch.long, device=self.model.device)
+            attention_mask = torch.ones_like(input_ids, device=self.model.device)
+
+            image_info = self.image_processor.preprocess(images=[image_pil])
+            pixel_values = torch.as_tensor(image_info['pixel_values'], dtype=torch.bfloat16, device=self.model.device)
+            grid_thws = torch.as_tensor(image_info['image_grid_thw'])
+
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    grid_thws=grid_thws,
+                    max_new_tokens=100,
+                    do_sample=False,
+                    use_cache=False,
+                )
+
+            prompt_len = input_ids.shape[1]
+            gen_ids = generated_ids[:, prompt_len:]
+            answer = self.processor.batch_decode(
+                gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )[0].strip()
+            return answer
         
         else:
             # LLaVA 等其他模型
@@ -408,11 +525,20 @@ class SimpleBaselineEvaluator:
             )
         
         # 解码
-        answer = self.processor.batch_decode(
-            output_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False
-        )[0]
+        # For Holo, trim prompt ids to avoid echo
+        if ("holo" in model_name) or ("hcompany" in model_name):
+            trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], output_ids)]
+            answer = self.processor.batch_decode(
+                trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )[0]
+        else:
+            answer = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )[0]
         
         # 清理输出
         if "llavaonevision" in model_name or "qwen" in model_name:

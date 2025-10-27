@@ -2,6 +2,8 @@ import os
 import json
 import re
 import string
+import base64
+from io import BytesIO
 from typing import List, Dict, Optional
 
 import torch
@@ -9,7 +11,8 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from torchvision import transforms
 from PIL import Image
 
-from transformers import AutoProcessor, AutoModel, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, AutoModel, Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoModelForCausalLM, Qwen2VLForConditionalGeneration, AutoImageProcessor, AutoModelForImageTextToText
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from config import Config
 from dataset import collate_fn
@@ -17,12 +20,6 @@ from utils import compute_text_metrics
 
 
 class FolderQADataset(Dataset):
-    """
-    基于文件夹的图片+QA数据集：
-    - images_dir: 直接指向包含图片的文件夹
-    - privacy_qa_path: 可选，格式与项目 data/*/privacy_qa.json 相同
-    - normal_qa_path: 可选，格式与项目 data/*/normal_qa.json 相同
-    """
 
     def __init__(
         self,
@@ -245,20 +242,73 @@ class SimpleEvaluatorNoGen:
             self.model = None
             self.processor = None
         else:
-            print(f"加载本地模型: {config.surrogate_model_name}")
-            self.processor = AutoProcessor.from_pretrained(
-                config.surrogate_model_name,
-                trust_remote_code=True,
-            )
-            if config.surrogate_model_name == "Qwen/Qwen2.5-VL-7B-Instruct":
-                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+
+            model_lower = config.surrogate_model_name.lower()
+            if ("holo" in model_lower) or ("hcompany" in model_lower):
+                self.processor = AutoProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True,
+                )
+            elif "internvl" in model_lower:
+                self.processor = AutoTokenizer.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+            elif "opencua" in model_lower:
+                self.processor = AutoTokenizer.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True,
+                )
+                self.image_processor = AutoImageProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True,
+                )
+            else:
+                print(f"加载本地模型: {config.surrogate_model_name}")
+                self.processor = AutoProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True,
+                )
+
+            if "internvl" in model_lower:
+                self.model = AutoModel.from_pretrained(
                     config.surrogate_model_name,
                     torch_dtype=torch.float16,
                     device_map="auto",
                     trust_remote_code=True,
                 )
-            else:
+            elif ("qwen" in model_lower) or ("tars" in model_lower):
+                if "2.5" in model_lower:
+                    self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                        config.surrogate_model_name,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True,
+                    )
+                else:
+                    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                        config.surrogate_model_name,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True,
+                    )
+            elif "opencua" in model_lower:
                 self.model = AutoModel.from_pretrained(
+                    config.surrogate_model_name,
+                    torch_dtype="auto",
+                    attn_implementation='eager',
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+            elif ("holo" in model_lower) or ("hcompany" in model_lower):
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    config.surrogate_model_name,
+                    dtype=torch.bfloat16,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+            else:
+                self.model = AutoModelForCausalLM.from_pretrained(
                     config.surrogate_model_name,
                     torch_dtype=torch.float16,
                     device_map="auto",
@@ -382,7 +432,7 @@ class SimpleEvaluatorNoGen:
             with torch.no_grad():
                 answer = self.model.chat(self.processor, pixel_values, question_with_image, generation_config)
             return answer
-        elif "qwen" in model_name:
+        elif "qwen" in model_name or "tars" in model_name:
             messages = [{
                 "role": "user",
                 "content": [
@@ -397,6 +447,77 @@ class SimpleEvaluatorNoGen:
             answer = self.processor.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
             if "assistant" in answer.lower():
                 answer = answer.split("assistant")[-1].strip().lstrip(":\n ")
+            return answer
+        elif ("holo" in model_name) or ("hcompany" in model_name):
+            # Holo models require smart resize according to image processor config
+            if image_pil.mode != "RGB":
+                image_pil = image_pil.convert("RGB")
+            cfg = getattr(self.processor, "image_processor", None)
+            if cfg is not None:
+                resized_h, resized_w = smart_resize(
+                    image_pil.height,
+                    image_pil.width,
+                    factor=cfg.patch_size * cfg.merge_size,
+                    min_pixels=cfg.min_pixels,
+                    max_pixels=cfg.max_pixels,
+                )
+                resampling = getattr(Image, "Resampling", Image).LANCZOS
+                processed_image = image_pil.resize((resized_w, resized_h), resample=resampling)
+            else:
+                processed_image = image_pil
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": processed_image},
+                    {"type": "text", "text": question},
+                ],
+            }]
+            text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor(
+                text=[text],
+                images=[processed_image],
+                padding=True,
+                return_tensors="pt",
+            ).to(self.model.device)
+            with torch.no_grad():
+                generated_ids = self.model.generate(**inputs, max_new_tokens=100, do_sample=False)
+            # Trim prompt tokens
+            generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)]
+            answer = self.processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            return answer
+        elif "opencua" in model_name:
+            def _encode_pil_to_base64_png(img: Image.Image) -> str:
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                return base64.b64encode(buf.getvalue()).decode()
+
+            data_uri = f"data:image/png;base64,{_encode_pil_to_base64_png(image_pil)}"
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": data_uri},
+                    {"type": "text", "text": question},
+                ],
+            }]
+            input_ids_list = self.processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+            input_ids = torch.tensor([input_ids_list], dtype=torch.long, device=self.model.device)
+            attention_mask = torch.ones_like(input_ids, device=self.model.device)
+            image_info = self.image_processor.preprocess(images=[image_pil])
+            pixel_values = torch.as_tensor(image_info['pixel_values'], dtype=torch.bfloat16, device=self.model.device)
+            grid_thws = torch.as_tensor(image_info['image_grid_thw'])
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    grid_thws=grid_thws,
+                    max_new_tokens=100,
+                    do_sample=False,
+                    use_cache=False,
+                )
+            prompt_len = input_ids.shape[1]
+            gen_ids = generated_ids[:, prompt_len:]
+            answer = self.processor.batch_decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
             return answer
         else:
             prompt = f"USER: <image>\n{question}\nASSISTANT:"

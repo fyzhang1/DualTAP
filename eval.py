@@ -2,23 +2,30 @@ import os
 import string
 import re
 import re
+import base64
+from io import BytesIO
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import AutoProcessor, AutoModel, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, AutoModel, Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoModelForCausalLM, Qwen2VLForConditionalGeneration, AutoImageProcessor, AutoModelForImageTextToText
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from tqdm import tqdm
 import json
 from PIL import Image
 import time
+import matplotlib.pyplot as plt
+import numpy as np
 
 from config import Config
 from generator import NoiseGenerator
+from attention import SaliencyAttention
 from dataset import PrivacyProtectionDataset, collate_fn
 from api_client import APIClient
 from utils import compute_text_metrics
 
 
 class LLMFieldExtractor:
-    """使用LLM从文本中抽取结构化字段"""
+
     
     def __init__(self, model_name="gpt-5-mini"):
         self.model_name = model_name
@@ -34,16 +41,6 @@ class LLMFieldExtractor:
             raise ImportError("请安装 openai 库: pip install openai")
     
     def extract(self, text, expected_fields):
-        """
-        从文本中抽取指定字段
-        
-        Args:
-            text: 待解析的文本
-            expected_fields: 期望抽取的字段列表，如 ['name', 'emailAddress', 'username']
-        
-        Returns:
-            dict: {field: value}，未找到的字段值为空字符串
-        """
         if not expected_fields:
             return {}
         
@@ -98,7 +95,6 @@ class LLMFieldExtractor:
 
 
 class SimpleEvaluator:
-    """简化的评估器：只计算字段匹配度"""
     
     def __init__(self, config, checkpoint_path, llm_model="gpt-4o-mini", normal_judge: str = "rule",
                  use_api: bool = False, api_type: str = None, api_key: str = None,
@@ -107,23 +103,50 @@ class SimpleEvaluator:
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
         self.normal_judge = normal_judge  # 'rule' | 'gpt' | 'both'
         self.use_api = use_api
-        
-        # 初始化LLM字段抽取器（直接从环境变量读取API Key）
+
         self.llm_extractor = LLMFieldExtractor(model_name=llm_model)
         print(f"已启用LLM字段抽取: model={llm_model}")
         
-        # 加载噪声生成器
+        # 加载噪声生成器（使用检查点中的超参数，保持与训练一致）
         print("加载噪声生成器...")
-        self.generator = NoiseGenerator(
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        saved_cfg = checkpoint.get('config', {}) or {}
+        gen_kwargs = dict(
             in_channels=3,
             out_channels=3,
-            epsilon=config.epsilon
-        ).to(self.device)
-        
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.generator.load_state_dict(checkpoint['generator_state_dict'])
+            epsilon=saved_cfg.get('epsilon', config.epsilon),
+            attn_gamma=saved_cfg.get('attn_gamma', 4.0),
+            attn_threshold=saved_cfg.get('attn_threshold', 0.85),
+            attn_topk_percent=saved_cfg.get('attn_topk_percent', 20),
+            attn_mix=saved_cfg.get('attn_mix', 0.9),
+            attn_dilate_kernel=saved_cfg.get('attn_dilate_kernel', 3),
+            attn_renorm=saved_cfg.get('attn_renorm', True),
+            attn_as_epsilon=saved_cfg.get('attn_as_epsilon', False),
+            attn_integration=saved_cfg.get('attn_integration', 'film'),
+            film_hidden=saved_cfg.get('film_hidden', 32),
+            film_strength=saved_cfg.get('film_strength', 1.0),
+        )
+        print(gen_kwargs)
+        self.generator = NoiseGenerator(**gen_kwargs).to(self.device)
+        try:
+            self.generator.load_state_dict(checkpoint['generator_state_dict'])
+        except RuntimeError:
+            self.generator.load_state_dict(checkpoint['generator_state_dict'], strict=False)
         self.generator.eval()
         print(f"已加载检查点: {checkpoint_path}")
+
+        # 将关键配置与训练时保持一致（用于评估流程中的注意力与尺寸等）
+        for k in [
+            'surrogate_model_name', 'attn_method', 'use_attention', 'image_size',
+            'attn_gamma', 'attn_threshold', 'attn_topk_percent', 'attn_mix',
+            'attn_dilate_kernel', 'attn_renorm', 'attn_as_epsilon', 'attn_integration',
+            'film_hidden', 'film_strength'
+        ]:
+            if k in saved_cfg:
+                try:
+                    setattr(self.config, k, saved_cfg[k])
+                except Exception:
+                    pass
         
         # 根据模式初始化代理模型
         if self.use_api:
@@ -138,21 +161,74 @@ class SimpleEvaluator:
             self.processor = None
         else:
             # 加载本地MLLM模型
-            print(f"加载本地模型: {config.surrogate_model_name}")
-            self.processor = AutoProcessor.from_pretrained(
-                config.surrogate_model_name,
-                trust_remote_code=True
-            )
-            
-            if config.surrogate_model_name == "Qwen/Qwen2.5-VL-7B-Instruct":
-                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_lower = config.surrogate_model_name.lower()
+            if "internvl" in model_lower:
+                self.processor = AutoTokenizer.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+            elif "opencua" in model_lower:
+                # OpenCUA: 分开加载 tokenizer 与 image processor
+                self.processor = AutoTokenizer.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+                self.image_processor = AutoImageProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+            elif "holo" in model_lower:
+                self.processor = AutoProcessor.from_pretrained(
+                    config.surrogate_model_name
+                )
+            else:
+                print(f"加载本地模型: {config.surrogate_model_name}")
+                self.processor = AutoProcessor.from_pretrained(
+                    config.surrogate_model_name,
+                    trust_remote_code=True
+                )
+
+            if "internvl" in model_lower:
+                self.model = AutoModel.from_pretrained(
                     config.surrogate_model_name,
                     torch_dtype=torch.float16,
                     device_map="auto",
                     trust_remote_code=True
                 )
-            else:
+            elif "holo" in model_lower or "hcompany" in model_lower:
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    config.surrogate_model_name,
+                    dtype=torch.bfloat16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                # Ensure processor is loaded (already set above)
+            elif ("qwen" in model_lower) or ("tars" in model_lower):
+                # Qwen 家族：2.5 用 Qwen2_5_VLForConditionalGeneration，否则用 Qwen2VLForConditionalGeneration
+                if "2.5" in model_lower:
+                    self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                        config.surrogate_model_name,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True
+                    )
+                else:
+                    self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+                        config.surrogate_model_name,
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True
+                    )
+            elif "opencua" in model_lower:
                 self.model = AutoModel.from_pretrained(
+                    config.surrogate_model_name,
+                    torch_dtype="auto",
+                    attn_implementation='eager',
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+            else:
+                self.model = AutoModelForCausalLM.from_pretrained(
                     config.surrogate_model_name,
                     torch_dtype=torch.float16,
                     device_map="auto",
@@ -160,6 +236,34 @@ class SimpleEvaluator:
                 )
             
             self.model.eval()
+
+        # 注意力提取器：固定为 OpenGVLab/InternVL3_5-2B（忽略 config/ckpt）
+        self.attn_extractor = None
+        if getattr(self.config, 'use_attention', True):
+            try:
+                attn_model_name = "OpenGVLab/InternVL3_5-2B"
+                print(f"加载注意力模型用于显著图: {attn_model_name}")
+                self.attn_tokenizer = AutoTokenizer.from_pretrained(
+                    attn_model_name,
+                    trust_remote_code=True
+                )
+                self.attn_model = AutoModel.from_pretrained(
+                    attn_model_name,
+                    torch_dtype=torch.float16,
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True
+                ).to(self.device)
+                self.attn_model.eval()
+                self.attn_extractor = SaliencyAttention(
+                    model=self.attn_model,
+                    tokenizer=self.attn_tokenizer,
+                    device=self.device,
+                    save_dir=None,
+                    method=getattr(self.config, 'attn_method', 'contrast_pixel_grad')
+                )
+            except Exception as e:
+                print(f"警告: 注意力模型加载失败，将不使用注意力: {e}")
+                self.attn_extractor = None
 
     def _judge_keyword_with_gpt(self, answer_text: str, keyword: str) -> bool:
         """使用GPT判断 answer_text 是否包含 keyword（忽略大小写/标点/空格），基于多候选。"""
@@ -256,6 +360,99 @@ class SimpleEvaluator:
         image = tensor.squeeze(0).cpu()
         return ToPILImage()(image)
     
+    def _save_noise_image(self, images, adversarial_images, app_name: str, image_path: str, attention_map=None):
+        """
+        保存评估时的可视化图像（与训练时格式一致）
+        5列：原始图像、注意力图、噪声、加噪后图像、差异图
+        """
+        try:
+            # 准备数据
+            img_np = images[0].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
+            x_adv_np = adversarial_images[0].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
+            delta = (adversarial_images - images)[0].detach().cpu()
+            delta_np = delta.abs().mean(dim=0).numpy()
+            
+            # 注意力图
+            if attention_map is not None:
+                if attention_map.shape[1] == 1:
+                    attn_np = attention_map[0, 0].detach().cpu().numpy()
+                else:
+                    attn_np = attention_map[0].detach().cpu().mean(dim=0).numpy()
+            else:
+                attn_np = np.zeros_like(img_np[:,:,0])
+            
+            # 差异图
+            diff_np = (x_adv_np - img_np).mean(axis=2)
+            diff_np = (diff_np - diff_np.min()) / (diff_np.max() - diff_np.min() + 1e-8)
+            
+            # 创建图像
+            fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+            
+            # 1. 原始图像
+            axes[0].imshow(img_np)
+            axes[0].set_title(f'Original\n{app_name}', fontsize=10)
+            axes[0].axis('off')
+            
+            # 2. 注意力图
+            if attention_map is not None:
+                im1 = axes[1].imshow(attn_np, cmap='jet', vmin=0, vmax=1)
+                axes[1].set_title(f'Attention Map\nmax={attn_np.max():.3f}', fontsize=10)
+                axes[1].axis('off')
+                plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+            else:
+                axes[1].text(0.5, 0.5, 'No Attention Map\n(Generator trained\nwith attention)', 
+                           ha='center', va='center', fontsize=10, transform=axes[1].transAxes)
+                axes[1].set_title('Attention Map\n(not extracted)', fontsize=10)
+                axes[1].axis('off')
+            
+            # 3. 噪声
+            im2 = axes[2].imshow(delta_np, cmap='hot')
+            axes[2].set_title(f'Noise\nL∞={delta_np.max():.4f}', fontsize=10)
+            axes[2].axis('off')
+            plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+            
+            # 4. 加噪后图像
+            axes[3].imshow(x_adv_np)
+            axes[3].set_title('Protected Image\n(with noise)', fontsize=10)
+            axes[3].axis('off')
+            
+            # 5. 差异图
+            im4 = axes[4].imshow(diff_np, cmap='hot')
+            axes[4].set_title('Difference\n(amplified)', fontsize=10)
+            axes[4].axis('off')
+            plt.colorbar(im4, ax=axes[4], fraction=0.046, pad=0.04)
+            
+            # 保存
+            stem = os.path.splitext(os.path.basename(image_path))[0]
+            save_dir = os.path.join('logs_eot', 'real', str(app_name))
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"{stem}_protected.png")
+            
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+            # 同时保存单独的加噪后图像（按原始截图尺寸保存）
+            from torchvision.transforms import ToPILImage
+            try:
+                orig_img = Image.open(image_path).convert('RGB')
+                orig_w, orig_h = orig_img.size
+            except Exception:
+                # 回退：若原图读取失败，则使用当前尺寸
+                orig_h, orig_w = adversarial_images.shape[-2:]
+            adv_resized = F.interpolate(
+                adversarial_images.detach().cpu(),
+                size=(orig_h, orig_w),
+                mode='bilinear',
+                align_corners=False
+            )[0].clamp(0, 1)
+            pil_adv = ToPILImage()(adv_resized)
+            adv_save_path = os.path.join(save_dir, f"{stem}_adversarial.png")
+            pil_adv.save(adv_save_path)
+            
+        except Exception as e:
+            print(f"保存可视化图失败: {str(e)}")
+    
     def query_model(self, image, question):
         """使用代理模型查询（本地或API）"""
         image_pil = self._tensor_to_pil(image)
@@ -288,7 +485,7 @@ class SimpleEvaluator:
                 )
             return answer
         
-        elif "qwen" in model_name:
+        elif "qwen" in model_name or "tars" in model_name:
             messages = [{
                 "role": "user",
                 "content": [
@@ -321,7 +518,80 @@ class SimpleEvaluator:
                 answer = answer.split("assistant")[-1].strip().lstrip(":\n ")
             
             return answer
+        elif "opencua" in model_name:
+            # OpenCUA 推理
+            def _encode_pil_to_base64_png(img: Image.Image) -> str:
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                return base64.b64encode(buf.getvalue()).decode()
+
+            data_uri = f"data:image/png;base64,{_encode_pil_to_base64_png(image_pil)}"
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": data_uri},
+                    {"type": "text", "text": question},
+                ],
+            }]
+            input_ids_list = self.processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+            input_ids = torch.tensor([input_ids_list], dtype=torch.long, device=self.model.device)
+            attention_mask = torch.ones_like(input_ids, device=self.model.device)
+
+            image_info = self.image_processor.preprocess(images=[image_pil])
+            pixel_values = torch.as_tensor(image_info['pixel_values'], dtype=torch.bfloat16, device=self.model.device)
+            grid_thws = torch.as_tensor(image_info['image_grid_thw'])
+
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                    grid_thws=grid_thws,
+                    max_new_tokens=100,
+                    do_sample=False,
+                    use_cache=False,
+                )
+            prompt_len = input_ids.shape[1]
+            gen_ids = generated_ids[:, prompt_len:]
+            answer = self.processor.batch_decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
+            return answer
         
+        elif ("holo" in model_name) or ("hcompany" in model_name):
+            # Holo pipeline: smart resize per image processor config and chat template
+            if image_pil.mode != "RGB":
+                image_pil = image_pil.convert("RGB")
+            cfg = getattr(self.processor, "image_processor", None)
+            if cfg is not None:
+                resized_h, resized_w = smart_resize(
+                    image_pil.height,
+                    image_pil.width,
+                    factor=cfg.patch_size * cfg.merge_size,
+                    min_pixels=cfg.min_pixels,
+                    max_pixels=cfg.max_pixels,
+                )
+                resampling = getattr(Image, "Resampling", Image).LANCZOS
+                processed_image = image_pil.resize((resized_w, resized_h), resample=resampling)
+            else:
+                processed_image = image_pil
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": processed_image},
+                    {"type": "text", "text": question},
+                ],
+            }]
+            text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor(
+                text=[text],
+                images=[processed_image],
+                padding=True,
+                return_tensors="pt",
+            ).to(self.model.device)
+            with torch.no_grad():
+                output_ids = self.model.generate(**inputs, max_new_tokens=100, do_sample=False)
+            trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], output_ids)]
+            answer = self.processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            return answer
         else:  # LLaVA等
             prompt = f"USER: <image>\n{question}\nASSISTANT:"
             inputs = self.processor(text=prompt, images=image_pil, return_tensors="pt").to(self.device)
@@ -388,9 +658,30 @@ class SimpleEvaluator:
             app_name = batch['app_names'][0]
             image_path = batch['image_paths'][0]
             
-            # 生成对抗样本
+            # 生成对抗样本：提取注意力图并进行注意力条件化（与训练保持一致）
+            if getattr(self.config, 'use_attention', True) and self.attn_extractor is not None:
+                try:
+                    with torch.enable_grad():
+                        attention_map = self.attn_extractor.get_attention_map(
+                            images, [privacy_qa_list], [normal_qa_list]
+                        )
+                except Exception:
+                    attention_map = None
+            else:
+                attention_map = None
+
             with torch.no_grad():
-                adversarial_images = self.generator.generate_adversarial(images)
+                delta = self.generator(images, attention_map=attention_map)
+                # 与训练保持一致的 L_inf 限幅：使用更小的 epsilon
+                gen_eps = float(getattr(self.generator, 'epsilon', getattr(self.config, 'epsilon', 255.0/255.0)))
+                cfg_eps = float(getattr(self.config, 'epsilon', gen_eps))
+                eps_bound = min(gen_eps, cfg_eps)
+                delta  = torch.clamp(delta, -eps_bound, eps_bound)
+                adversarial_images = images + delta
+                adversarial_images = torch.clamp(adversarial_images, 0.0, 1.0)
+            
+            # 保存可视化图（提供注意力图以对齐训练可视化）
+            self._save_noise_image(images, adversarial_images, app_name, image_path, attention_map=attention_map)
             
             item_result = {
                 'app_name': app_name,
