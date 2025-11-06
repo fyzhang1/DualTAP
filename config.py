@@ -10,7 +10,7 @@ class Config:
     train_split_ratio = 0.0
     
     # 噪声约束
-    epsilon = 255.0 / 255.0
+    epsilon = 128.0 / 255.0
     
     # 训练相关配置
     batch_size = 4  # 降低以适应显存
@@ -22,9 +22,8 @@ class Config:
     beta = 1.0   # 隐私任务损失权重
     
     # 代理 MLLM 配置
-    # surrogate_model_name = "llava-hf/llava-1.5-7b-hf"  # 或其他MLLM llava-1.5-7b-hf的效果差的跟屎一样
     # xlangai/OpenCUA-7B；ByteDance-Seed/UI-TARS-7B-SFT"; Qwen/Qwen2.5-VL-7B-Instruct "OpenGVLab/InternVL3_5-2B"   openbmb/MiniCPM-V-4_5 "llava-hf/llava-onevision-qwen2-7b-ov-hf"
-    surrogate_model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
+    surrogate_model_name = "OpenGVLab/InternVL3_5-2B"
     # 保存相关
     checkpoint_dir = "./checkpoints"
     save_interval = 60  # 每N个epoch保存一次
@@ -39,7 +38,7 @@ class Config:
     # 注意力整形参数（用于生成器侧）
     attn_gamma = 4.0           # >1 提升热点对比度，增大以提高区分度（从2.0提升至4.0）
     attn_threshold = 0.85      # >0 时按阈值二值化，范围 [0,1]（从0.75提升至0.85）
-    attn_topk_percent = 30      # >0 时按比例保留前 k%（0~100）（从10降至5）
+    attn_topk_percent = 60      # >0 时按比例保留前 k%（0~100）（从10降至5）
     attn_mix = 0.95             # 【关键修复】与全局权重混合：m*attn + (1-m)（从0.9改为1.0，消除全局baseline）
     # 注意力扩张与重归一
     attn_dilate_kernel = 3     # 3/5 进行邻域扩张；1 表示不扩张 - 禁用膨胀

@@ -98,10 +98,12 @@ class MaskedAttentionBaseline:
                  noise_sigma: float = None,
                  blur_kernel: int = None,
                  blur_sigma: float = None,
-                 save_masks_dir: str = None):
+                 save_masks_dir: str = None,
+                 use_attention_mask: bool = True):
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
         self.device_str = ("cuda" if torch.cuda.is_available() and "cuda" in str(self.device) else "cpu")
+        self.use_attention_mask = use_attention_mask
 
         # 如果提供了 checkpoint，从中读取训练时的配置（与 eval.py 保持一致）
         saved_cfg = {}
@@ -139,69 +141,79 @@ class MaskedAttentionBaseline:
             api_base_url=None
         )
 
-        # 注意力提取器：固定使用训练时的模型（与 eval.py 250-276行保持一致）
-        from transformers import AutoModel, AutoTokenizer
-        attn_model_name = "OpenGVLab/InternVL3_5-2B"
-        print(f"加载注意力模型用于显著图: {attn_model_name}")
-        self.attn_model = AutoModel.from_pretrained(
-            attn_model_name,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            trust_remote_code=True
-        ).to(self.device)
-        for p in self.attn_model.parameters():
-            p.requires_grad = False
-        self.attn_model.eval()
-        self.attn_tokenizer = AutoTokenizer.from_pretrained(attn_model_name, trust_remote_code=True)
+        # 注意力提取器：只在使用注意力掩膜时加载
+        if self.use_attention_mask:
+            from transformers import AutoModel, AutoTokenizer
+            attn_model_name = "OpenGVLab/InternVL3_5-2B"
+            print(f"加载注意力模型用于显著图: {attn_model_name}")
+            self.attn_model = AutoModel.from_pretrained(
+                attn_model_name,
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True
+            ).to(self.device)
+            for p in self.attn_model.parameters():
+                p.requires_grad = False
+            self.attn_model.eval()
+            self.attn_tokenizer = AutoTokenizer.from_pretrained(attn_model_name, trust_remote_code=True)
+        else:
+            print("跳过注意力模型加载（使用全图遮挡模式）")
+            self.attn_model = None
+            self.attn_tokenizer = None
 
-        # 注意力方法与整形参数（优先级：命令行参数 > checkpoint > config）
-        self.attn_method = (
-            attn_method if attn_method is not None 
-            else saved_cfg.get('attn_method', getattr(config, 'attn_method', 'pixel_grad'))
-        )
-        
-        # 从 checkpoint 或 config 或命令行参数获取注意力整形参数
-        final_gamma = (
-            attn_gamma if attn_gamma is not None 
-            else saved_cfg.get('attn_gamma', getattr(config, 'attn_gamma', 4.0))
-        )
-        final_threshold = (
-            attn_threshold if attn_threshold is not None 
-            else saved_cfg.get('attn_threshold', getattr(config, 'attn_threshold', 0.85))
-        )
-        final_topk = (
-            attn_topk_percent if attn_topk_percent is not None 
-            else saved_cfg.get('attn_topk_percent', getattr(config, 'attn_topk_percent', 50))
-        )
-        final_dilate = (
-            attn_dilate_kernel if attn_dilate_kernel is not None 
-            else saved_cfg.get('attn_dilate_kernel', getattr(config, 'attn_dilate_kernel', 3))
-        )
-        
-        print(f"使用注意力参数: method={self.attn_method}, gamma={final_gamma}, "
-              f"threshold={final_threshold}, topk={final_topk}, dilate={final_dilate}")
+        # 注意力方法与整形参数（只在使用注意力掩膜时初始化）
+        if self.use_attention_mask:
+            self.attn_method = (
+                attn_method if attn_method is not None 
+                else saved_cfg.get('attn_method', getattr(config, 'attn_method', 'pixel_grad'))
+            )
+            
+            # 从 checkpoint 或 config 或命令行参数获取注意力整形参数
+            final_gamma = (
+                attn_gamma if attn_gamma is not None 
+                else saved_cfg.get('attn_gamma', getattr(config, 'attn_gamma', 4.0))
+            )
+            final_threshold = (
+                attn_threshold if attn_threshold is not None 
+                else saved_cfg.get('attn_threshold', getattr(config, 'attn_threshold', 0.85))
+            )
+            final_topk = (
+                attn_topk_percent if attn_topk_percent is not None 
+                else saved_cfg.get('attn_topk_percent', getattr(config, 'attn_topk_percent', 50))
+            )
+            final_dilate = (
+                attn_dilate_kernel if attn_dilate_kernel is not None 
+                else saved_cfg.get('attn_dilate_kernel', getattr(config, 'attn_dilate_kernel', 3))
+            )
+            
+            print(f"使用注意力参数: method={self.attn_method}, gamma={final_gamma}, "
+                  f"threshold={final_threshold}, topk={final_topk}, dilate={final_dilate}")
 
-        # 使用 NoiseGenerator 的注意力整形工具，便于与训练侧一致
-        self.mask_shaper = NoiseGenerator(
-            in_channels=3,
-            out_channels=3,
-            epsilon=1.0,  # 与噪声无关，仅复用 shape_attention_map
-            attn_gamma=final_gamma,
-            attn_threshold=final_threshold,
-            attn_topk_percent=final_topk,
-            attn_mix=0.9,  # 生成掩膜时不与全局混合
-            attn_dilate_kernel=final_dilate,
-            attn_renorm=False,
-            attn_as_epsilon=False,
-        ).to(self.device)
+            # 使用 NoiseGenerator 的注意力整形工具，便于与训练侧一致
+            self.mask_shaper = NoiseGenerator(
+                in_channels=3,
+                out_channels=3,
+                epsilon=1.0,  # 与噪声无关，仅复用 shape_attention_map
+                attn_gamma=final_gamma,
+                attn_threshold=final_threshold,
+                attn_topk_percent=final_topk,
+                attn_mix=0.9,  # 生成掩膜时不与全局混合
+                attn_dilate_kernel=final_dilate,
+                attn_renorm=False,
+                attn_as_epsilon=False,
+            ).to(self.device)
 
-        self.attn_extractor = SaliencyAttention(
-            model=self.attn_model,
-            tokenizer=self.attn_tokenizer,
-            device=self.device,
-            save_dir=None,
-            method=self.attn_method,
-        )
+            self.attn_extractor = SaliencyAttention(
+                model=self.attn_model,
+                tokenizer=self.attn_tokenizer,
+                device=self.device,
+                save_dir=None,
+                method=self.attn_method,
+            )
+        else:
+            self.attn_method = None
+            self.mask_shaper = None
+            self.attn_extractor = None
 
         # 遮挡样式设置
         self.mask_style = (mask_style or 'black').lower()
@@ -539,16 +551,18 @@ class MaskedAttentionBaseline:
             out_dir = os.path.dirname(output_path)
             if out_dir and out_dir != '.':
                 os.makedirs(out_dir, exist_ok=True)
+            mode_str = f"baseline ({'attention' if self.use_attention_mask else 'full-image'} masked: {self.mask_style})"
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump({
                     'status': 'evaluating',
-                    'mode': f"baseline (attention masked: {self.mask_style})",
+                    'mode': mode_str,
                     'progress': 0,
                     'total': len(dataset),
                     'detailed_results': []
                 }, f, indent=2, ensure_ascii=False)
 
-        print(f"开始基于注意力遮挡的Baseline评估，样式: {self.mask_style} ...")
+        mode_desc = "基于注意力遮挡" if self.use_attention_mask else "全图遮挡"
+        print(f"开始{mode_desc}的Baseline评估，样式: {self.mask_style} ...")
         for idx, batch in enumerate(tqdm(dataloader)):
             images = batch['images'].to(self.device)  # [1,3,H,W], [0,1]
             privacy_qa_list = batch['privacy_qa_list'][0]
@@ -556,10 +570,15 @@ class MaskedAttentionBaseline:
             app_name = batch['app_names'][0]
             image_path = batch['image_paths'][0]
 
-            # 生成遮挡掩膜（注意力）
-            # 计算隐私注意力（不使用对比normal，避免误抵消）
-            attn_map = self.attn_extractor.get_attention_map(images, [privacy_qa_list], None)[0:1]
-            binary_mask = self._build_binary_mask(attn_map, images)
+            # 生成遮挡掩膜
+            if self.use_attention_mask:
+                # 使用注意力图生成掩膜
+                attn_map = self.attn_extractor.get_attention_map(images, [privacy_qa_list], None)[0:1]
+                binary_mask = self._build_binary_mask(attn_map, images)
+            else:
+                # 不使用注意力图，对整个图像应用遮挡（全1掩膜）
+                binary_mask = torch.ones(1, 1, images.shape[2], images.shape[3], 
+                                        device=images.device, dtype=images.dtype)
             style = self.mask_style
             if style == 'black':
                 masked_images = self._apply_black_mask(images, binary_mask)
@@ -728,9 +747,10 @@ class MaskedAttentionBaseline:
                 agg_bleu = _avg_safe(bleu_list)
                 agg_rouge = _avg_safe(rougeL_list)
                 
+                mode_str = f"baseline ({'attention' if self.use_attention_mask else 'full-image'} masked: {self.mask_style})"
                 intermediate_results = {
                     'status': 'evaluating',
-                    'mode': f"baseline (attention masked: {self.mask_style})",
+                    'mode': mode_str,
                     'progress': idx + 1,
                     'total': len(dataset),
                     'average_match_score': round(avg_match, 4),
@@ -765,9 +785,10 @@ class MaskedAttentionBaseline:
         agg_bleu = _avg_safe(bleu_list)
         agg_rouge = _avg_safe(rougeL_list)
 
+        mode_str = f"baseline ({'attention' if self.use_attention_mask else 'full-image'} masked: {self.mask_style})"
         results = {
             'status': 'completed',
-            'mode': f"baseline (attention masked: {self.mask_style})",
+            'mode': mode_str,
             'average_match_score': round(avg_match, 4),
             'total_fields_evaluated': len(all_match_scores),
             'leakage_rate': round(leakage_rate, 4),
@@ -821,6 +842,8 @@ def main():
     parser.add_argument('--normal-judge', type=str, default='gpt', choices=['rule','gpt','both'], help='normal QA 判断方式')
     # 可视化导出
     parser.add_argument('--save-masks-dir', type=str, default=None, help='仅保存遮挡后的图像到该目录')
+    # 是否使用注意力图
+    parser.add_argument('--no-attention', action='store_true', help='不使用注意力图，直接对整个图像应用遮挡')
 
     args = parser.parse_args()
 
@@ -858,6 +881,7 @@ def main():
         blur_kernel=args.blur_kernel,
         blur_sigma=args.blur_sigma,
         save_masks_dir=args.save_masks_dir,
+        use_attention_mask=not args.no_attention,  # 添加注意力掩膜开关
     )
 
     print(f"结果将实时保存至: {args.output}")

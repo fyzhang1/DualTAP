@@ -117,7 +117,7 @@ class SimpleEvaluator:
             epsilon=saved_cfg.get('epsilon', config.epsilon),
             attn_gamma=saved_cfg.get('attn_gamma', 4.0),
             attn_threshold=saved_cfg.get('attn_threshold', 0.85),
-            attn_topk_percent=saved_cfg.get('attn_topk_percent', 20),
+            attn_topk_percent=saved_cfg.get('attn_topk_percent', 50),
             attn_mix=saved_cfg.get('attn_mix', 0.9),
             attn_dilate_kernel=saved_cfg.get('attn_dilate_kernel', 3),
             attn_renorm=saved_cfg.get('attn_renorm', True),
