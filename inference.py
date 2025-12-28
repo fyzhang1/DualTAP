@@ -19,13 +19,10 @@ from transformers import AutoModel, AutoTokenizer
 
 
 def load_generator(checkpoint_path, config):
-    """加载噪声生成器（向后兼容旧的转置卷积上采样检查点）"""
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     saved_cfg = checkpoint.get('config', {}) or {}
-
-    # 使用训练时保存的配置尽量还原生成器超参
     gen_kwargs = dict(
         in_channels=3,
         out_channels=3,
@@ -46,26 +43,21 @@ def load_generator(checkpoint_path, config):
 
     state = checkpoint['generator_state_dict']
 
-    # 若检查点包含旧版转置卷积权重，尝试转换为新的 reduce(1x1) 权重
     if any(k.endswith('.up.weight') for k in state.keys()):
         new_state = state.copy()
         for name in ['up1', 'up2', 'up3', 'up4']:
             w_key = f'{name}.up.weight'
             b_key = f'{name}.up.bias'
             if w_key in state:
-                W = state[w_key]  # 形状: [in_c, out_c, 2, 2] (ConvTranspose2d)
-                # 将 2x2 kernel 平均并转置通道以匹配 1x1 Conv2d 的 [out_c, in_c,1,1]
+                W = state[w_key] 
                 W_reduce = W.mean(dim=(2, 3)).permute(1, 0).unsqueeze(-1).unsqueeze(-1)
                 new_state[f'{name}.reduce.weight'] = W_reduce
                 if b_key in state:
                     new_state[f'{name}.reduce.bias'] = state[b_key]
-                # 移除旧键
                 new_state.pop(w_key, None)
                 new_state.pop(b_key, None)
-        # 非严格加载，忽略无法匹配的键
         generator.load_state_dict(new_state, strict=False)
     else:
-        # 尝试严格加载；失败则退回非严格
         try:
             generator.load_state_dict(state)
         except RuntimeError:
@@ -73,7 +65,6 @@ def load_generator(checkpoint_path, config):
 
     generator.eval()
 
-    # 同步关键配置到 config（用于下游注意力与尺寸设置，确保与训练一致）
     for k in [
         'surrogate_model_name', 'attn_method', 'use_attention', 'image_size',
         'attn_gamma', 'attn_threshold', 'attn_topk_percent', 'attn_mix',
@@ -90,10 +81,6 @@ def load_generator(checkpoint_path, config):
 
 
 def save_visualization(image_tensor, adversarial_tensor, noise, save_path, image_name, attention_map=None):
-    """
-    保存5列可视化图（与训练/评估格式一致）
-    列：原始图像 | 注意力图占位 | 噪声 | 加噪后图像 | 差异图
-    """
     try:
         # 准备数据
         img_np = image_tensor[0].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
@@ -150,33 +137,15 @@ def save_visualization(image_tensor, adversarial_tensor, noise, save_path, image
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         
-        print(f"可视化图已保存至: {save_path}")
+        print(f"Figure are saved: {save_path}")
         
     except Exception as e:
-        print(f"警告: 保存可视化图失败: {e}")
+        print(f"Warning: {e}")
 
 
 def generate_adversarial_image(image_path, generator, device, image_size=448, attention_map=None):
-    """
-    为单张图像生成对抗样本
-    
-    Args:
-        image_path: 输入图像路径
-        generator: 噪声生成器
-        device: 设备
-        image_size: 图像尺寸（应该与训练时一致，通常是448）
-    
-    Returns:
-        original_image_resized: PIL Image，resize后的原始图像（448x448）
-        adversarial_image: PIL Image，对抗样本（448x448）
-        image_tensor: Tensor，原始图像张量（用于可视化）
-        adversarial_tensor: Tensor，对抗图像张量（用于可视化）
-        noise: Tensor，生成的噪声
-    """
-    # 加载图像
     original_image = Image.open(image_path).convert('RGB')
     
-    # 图像预处理（resize到训练尺寸）
     transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
@@ -184,7 +153,6 @@ def generate_adversarial_image(image_path, generator, device, image_size=448, at
     
     image_tensor = transform(original_image).unsqueeze(0).to(device)  # (1, C, H, W)
     
-    # 生成对抗样本
     with torch.no_grad():
         use_attn = False
         if attention_map is not None:
@@ -277,19 +245,14 @@ def main():
         print(f"错误: 检查点不存在 {args.checkpoint}")
         return
     
-    # 加载配置
     config = Config()
     
-    # 加载生成器
-    print("加载噪声生成器...")
     generator, device = load_generator(args.checkpoint, config)
     
-    # 可选：准备注意力图（固定使用 OpenGVLab/InternVL3_5-2B）
     attention_map = None
     if args.use_attention:
         privacy_qa_list = []
         normal_qa_list = []
-        # 从JSON读取或从命令行构造
         if args.qa_json and os.path.exists(args.qa_json):
             try:
                 with open(args.qa_json, 'r', encoding='utf-8') as f:
@@ -303,10 +266,8 @@ def main():
             normal_qa_list = [[]]
         else:
             print("警告: 开启 --use-attention 但未提供 QA；将回退为无注意力模式")
-        # 若提供了有效QA，则加载固定的注意力模型并提取注意力
         if privacy_qa_list:
             attn_model_name = getattr(config, 'surrogate_model_name', 'OpenGVLab/InternVL3_5-2B')
-            print(f"加载注意力模型用于显著图: {attn_model_name}")
             surrogate = AutoModel.from_pretrained(
                 attn_model_name,
                 torch_dtype=torch.float16,
@@ -325,7 +286,6 @@ def main():
                 save_dir=None,
                 method=getattr(config, 'attn_method', 'xattn_grad')
             )
-            # 读取并预处理图像到张量
             img = Image.open(args.image).convert('RGB')
             transform = transforms.Compose([
                 transforms.Resize((config.image_size, config.image_size)),
@@ -338,11 +298,9 @@ def main():
                         img_tensor, privacy_qa_list, normal_qa_list or [[]]
                     )
                 except Exception as e:
-                    print(f"警告: 提取注意力图失败，回退无注意力: {e}")
                     attention_map = None
 
-    # 生成对抗样本
-    print(f"处理图像: {args.image}")
+
     original_image, adversarial_image, image_tensor, adversarial_tensor, noise = generate_adversarial_image(
         args.image,
         generator,
@@ -351,13 +309,9 @@ def main():
         attention_map=attention_map
     )
     
-    # 保存加噪后的图像（保持训练时的尺寸）
     adversarial_image.save(args.output)
-    print(f"\n✓ 保护图像已保存至: {args.output}")
-    print(f"  图像尺寸: {adversarial_image.size[0]}×{adversarial_image.size[1]} (与训练时一致)")
-    
-    # 可选：同时保存原始尺寸的图像
-    save_original_size = True  # 可以改为命令行参数
+
+    save_original_size = True 
     original_input_size = Image.open(args.image).size
     original_size_path = None
     if save_original_size and original_input_size != adversarial_image.size:
@@ -372,9 +326,7 @@ def main():
             PILImage.LANCZOS
         )
         adversarial_original_size.save(original_size_path)
-        print(f"  原始尺寸版本: {original_size_path} ({original_input_size[0]}×{original_input_size[1]})")
     
-    # 保存可视化图
     if args.vis is None:
         base_name = os.path.splitext(args.output)[0]
         vis_path = f"{base_name}_visualization.png"
@@ -383,28 +335,6 @@ def main():
     
     image_name = os.path.basename(args.image)
     save_visualization(image_tensor, adversarial_tensor, noise, vis_path, image_name, attention_map=attention_map)
-    
-    # 计算噪声统计信息
-    noise_max = noise.abs().max().item()
-    noise_mean = noise.abs().mean().item()
-    print(f"\n噪声统计:")
-    print(f"  最大值 (L∞): {noise_max:.6f}")
-    print(f"  平均值: {noise_mean:.6f}")
-    print(f"  epsilon约束: {config.epsilon:.6f}")
-    
-    print(f"\n📁 输出文件:")
-    print(f"  1. 保护图像 (训练尺寸): {args.output}")
-    if save_original_size and original_input_size != adversarial_image.size and original_size_path is not None:
-        print(f"  2. 保护图像 (原始尺寸): {original_size_path}")
-        print(f"  3. 可视化对比图: {vis_path}")
-    else:
-        print(f"  2. 可视化对比图: {vis_path}")
-    
-    print(f"\n💡 提示:")
-    print(f"  - 主要输出 ({args.output}) 是 {config.image_size}×{config.image_size} 的保护图像")
-    print(f"  - 这与训练/评估时的图像尺寸一致，保证最佳保护效果")
-    print(f"  - 如需其他尺寸，可以使用图像处理工具resize")
-
 
 if __name__ == "__main__":
     main()

@@ -34,9 +34,7 @@ class Down(nn.Module):
 class Up(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        # Use bilinear upsampling to avoid transposed-conv banding artifacts
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        # Reduce channels after upsampling to match skip connection concat
         self.reduce = nn.Conv2d(in_channels, in_channels // 2, kernel_size=1)
         self.conv = DoubleConv(in_channels, out_channels)
 
@@ -52,10 +50,6 @@ class Up(nn.Module):
 
 
 class SpatialFiLM(nn.Module):
-    """
-    将单通道注意力图映射为逐通道、逐像素的 FiLM 参数（gamma, beta）。
-    设计为弱扰动初始化：输出初始为 0，从而 gamma≈1, beta≈0。
-    """
     def __init__(self, out_channels: int, hidden_channels: int = 32):
         super().__init__()
         self.encoder = nn.Sequential(
@@ -63,14 +57,14 @@ class SpatialFiLM(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_channels, 2 * out_channels, kernel_size=3, padding=1)
         )
-        # 将最后一层初始化为 0，确保初始时不改变特征
+
         nn.init.zeros_(self.encoder[-1].weight)
         nn.init.zeros_(self.encoder[-1].bias)
 
     def forward(self, attn_map: torch.Tensor, target_hw) -> (torch.Tensor, torch.Tensor):
-        # 将注意力图插值到目标尺寸
+
         attn_resized = nn.functional.interpolate(attn_map, size=target_hw, mode='bilinear', align_corners=False)
-        film_params = self.encoder(attn_resized)  # [B, 2C, H, W]
+        film_params = self.encoder(attn_resized) 
         gamma_delta, beta = torch.chunk(film_params, chunks=2, dim=1)
         return gamma_delta, beta
 
@@ -79,21 +73,13 @@ def apply_film(features: torch.Tensor,
                gamma_delta: torch.Tensor,
                beta: torch.Tensor,
                strength: float = 1.0) -> torch.Tensor:
-    """
-    在特征上应用 FiLM：y = (1 + strength * tanh(gamma_delta)) * x + strength * tanh(beta)
-    使用 tanh 限幅，避免数值过大；strength 控制调制强度。
-    """
+
     scaled_gamma = 1.0 + strength * torch.tanh(gamma_delta)
     scaled_beta = strength * torch.tanh(beta)
     return scaled_gamma * features + scaled_beta
 
 
 class NoiseGenerator(nn.Module):
-    """
-    基于 U-Net 的噪声生成器
-    输入：原始图像 X (C, H, W)
-    输出：扰动 δ (C, H, W)，其中 ||δ||_∞ ≤ ε
-    """
     def __init__(self, in_channels=3, out_channels=3, epsilon=8.0/255.0,
                  attn_gamma=1.0, attn_threshold=0.0, attn_topk_percent=0.0, attn_mix=1.0,
                  attn_dilate_kernel=1, attn_renorm=False, attn_as_epsilon=False,
@@ -111,31 +97,31 @@ class NoiseGenerator(nn.Module):
         self.attn_as_epsilon = attn_as_epsilon
         self.attn_integration = attn_integration
         self.film_strength = film_strength
-        # 输出控制标志
+
         self.output_gate_with_attention = output_gate_with_attention
         self.noise_center_dc = noise_center_dc
         self.noise_balance_by_std = noise_balance_by_std
-        # ImageNet 归一化的 std（用于通道平衡）
+
         self.register_buffer('imagenet_std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         
-        # 编码器
+
         self.inc = DoubleConv(in_channels, 64)
         self.down1 = Down(64, 128)
         self.down2 = Down(128, 256)
         self.down3 = Down(256, 512)
         self.down4 = Down(512, 1024)
         
-        # 解码器
+
         self.up1 = Up(1024, 512)
         self.up2 = Up(512, 256)
         self.up3 = Up(256, 128)
         self.up4 = Up(128, 64)
         
-        # 输出层
+
         self.outc = nn.Conv2d(64, out_channels, kernel_size=1)
         self.tanh = nn.Tanh()
 
-        # 注意力条件化（FiLM）模块：与各层通道数对齐
+
         if self.attn_integration == 'film':
             self.film_inc = SpatialFiLM(out_channels=64, hidden_channels=film_hidden)
             self.film_d1 = SpatialFiLM(out_channels=128, hidden_channels=film_hidden)
@@ -148,17 +134,6 @@ class NoiseGenerator(nn.Module):
             self.film_u4 = SpatialFiLM(out_channels=64, hidden_channels=film_hidden)
 
     def shape_attention_map(self, attention_map, target_size, out_channels):
-        """
-        对外暴露的注意力整形函数：
-        - clamp 到 [0,1]
-        - 插值到目标尺寸
-        - gamma 增强
-        - 可选膨胀（max-pool）
-        - Top-k 或阈值二值化（Top-k 优先）
-        - 与全局混合：m*attn + (1-m)
-        - 通道广播或汇聚到 out_channels
-        返回形状为 [B, out_channels, H, W] 的张量，范围 [0,1]
-        """
         attn = attention_map.clamp(0.0, 1.0)
         attn = nn.functional.interpolate(attn, size=target_size, mode='bilinear', align_corners=False)
         if self.attn_gamma != 1.0:
@@ -180,25 +155,17 @@ class NoiseGenerator(nn.Module):
         if self.attn_mix != 1.0:
             attn = self.attn_mix * attn + (1.0 - self.attn_mix)
             attn = attn.clamp(0.0, 1.0)
-        # 调整通道数
+
         if out_channels == 1 and attn.shape[1] > 1:
             attn = attn.mean(dim=1, keepdim=True)
         if out_channels > 1 and attn.shape[1] == 1:
             attn = attn.repeat(1, out_channels, 1, 1)
-        # 最终保障尺寸
+
         attn = nn.functional.interpolate(attn, size=target_size, mode='bilinear', align_corners=False)
         return attn
 
     def forward(self, x, attention_map=None):
-        """
-        前向传播
-        Args:
-            x: 输入图像，形状为 (B, C, H, W)，值域 [0, 1]
-            attention_map: 可选注意力图 (B, 1, H, W) 或 (B, 3, H, W)，值域 [0,1]
-        Returns:
-            delta: 生成的扰动，形状为 (B, C, H, W)，值域 [-ε, ε]
-        """
-        # 编码器
+
         x1 = self.inc(x)
         if attention_map is not None and self.attn_integration == 'film':
             gd, bt = self.film_inc(attention_map, x1.shape[-2:])
@@ -224,7 +191,7 @@ class NoiseGenerator(nn.Module):
             gd, bt = self.film_d4(attention_map, x5.shape[-2:])
             x5 = apply_film(x5, gd, bt, strength=self.film_strength)
 
-        # 解码器
+
         x = self.up1(x5, x4)
         if attention_map is not None and self.attn_integration == 'film':
             gd, bt = self.film_u1(attention_map, x.shape[-2:])
@@ -245,38 +212,17 @@ class NoiseGenerator(nn.Module):
             gd, bt = self.film_u4(attention_map, x.shape[-2:])
             x = apply_film(x, gd, bt, strength=self.film_strength)
         
-        # 输出：先用 tanh 将输出限制在 [-1, 1]
+
         delta_raw = self.outc(x)
         delta_raw = self.tanh(delta_raw)
 
-        # 输出阶段：统一进行 ε 约束；若未提供注意力，等价于纯 U-Net
+
         if attention_map is None:
             return delta_raw * self.epsilon
 
-        # 使用注意力：FiLM + 输出门控（避免全局均匀噪声）
+
         if self.attn_integration == 'film':
             delta = delta_raw * self.epsilon
-            
-            # 通道中心化：去除每个通道的空间均值（DC分量），避免整图偏色
-            # if self.noise_center_dc:
-            #     dc = delta.mean(dim=[2, 3], keepdim=True)
-            #     delta = delta - dc
-            
-            # 通道平衡：按 ImageNet std 缩放，使各通道在归一化空间中影响相等
-            # if self.noise_balance_by_std:
-            #     std_mean = self.imagenet_std.mean()
-            #     delta = delta * (self.imagenet_std / std_mean)
-            
-            # if self.output_gate_with_attention:
-            #     mask = self.shape_attention_map(attention_map, target_size=delta.shape[-2:], out_channels=delta.shape[1])
-            #     delta = delta * mask
-            #     # if self.attn_renorm:
-            #     #     denom = mask.abs().amax(dim=(1,2,3), keepdim=True) + 1e-8
-            #     #     delta = delta / denom
-            #     delta = delta.clamp(-self.epsilon, self.epsilon)
-            # return delta
-
-        # 兼容旧模式（非 film）：可选作为每像素 ε 或乘法掩码
         if self.attn_as_epsilon:
             attn1 = self.shape_attention_map(attention_map, target_size=delta_raw.shape[-2:], out_channels=1)
             attn_c = attn1.repeat(1, delta_raw.shape[1], 1, 1)
@@ -293,15 +239,9 @@ class NoiseGenerator(nn.Module):
             return delta
 
     def generate_adversarial(self, x):
-        """
-        生成对抗样本
-        Args:
-            x: 原始图像，形状为 (B, C, H, W)，值域 [0, 1]
-        Returns:
-            x_adv: 对抗样本，形状为 (B, C, H, W)，值域 [0, 1]
-        """
+
         delta = self.forward(x)
         x_adv = x + delta
-        # 确保对抗样本在 [0, 1] 范围内
+
         x_adv = torch.clamp(x_adv, 0.0, 1.0)
         return x_adv

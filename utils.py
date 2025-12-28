@@ -14,25 +14,24 @@ _st_model = None
 _rouge = None
 _sacrebleu = None
 
-# Optional deps
+
 _psutil = None
 
 def _lazy_import_bert_scorer():
     global _bert_scorer
     if _bert_scorer is None:
         try:
-            from bert_score import BERTScorer  # type: ignore
-            # Use a multilingual small model by default for speed; caller can override if needed
+            from bert_score import BERTScorer 
             _bert_scorer = BERTScorer(lang="en", model_type="microsoft/deberta-base-mnli", rescale_with_baseline=True)
         except Exception:
-            _bert_scorer = False  # sentinel for unavailable
+            _bert_scorer = False
     return _bert_scorer
 
 def _lazy_import_st_model():
     global _st_model
     if _st_model is None:
         try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
+            from sentence_transformers import SentenceTransformer
             _st_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         except Exception:
             _st_model = False
@@ -71,33 +70,17 @@ def _lazy_import_psutil():
 
 
 def tensor_to_numpy(tensor):
-    """
-    将 Tensor (C, H, W) 转换为 numpy array (H, W, C)
-    """
     if tensor.dim() == 4:
         tensor = tensor.squeeze(0)
     return tensor.permute(1, 2, 0).cpu().numpy()
 
 
 def numpy_to_tensor(array, device='cpu'):
-    """
-    将 numpy array (H, W, C) 转换为 Tensor (C, H, W)
-    """
     tensor = torch.from_numpy(array).permute(2, 0, 1).float()
     return tensor.to(device)
 
 
 def calculate_psnr(img1, img2):
-    """
-    计算两张图像之间的 PSNR（峰值信噪比）
-    
-    Args:
-        img1: Tensor (C, H, W) 或 (B, C, H, W)，值域 [0, 1]
-        img2: Tensor (C, H, W) 或 (B, C, H, W)，值域 [0, 1]
-    
-    Returns:
-        psnr: float，PSNR 值（单位：dB）
-    """
     mse = torch.mean((img1 - img2) ** 2)
     if mse == 0:
         return float('inf')
@@ -108,44 +91,17 @@ def calculate_psnr(img1, img2):
 
 
 def calculate_linf_norm(tensor):
-    """
-    计算 Tensor 的 L-infinity 范数
-    
-    Args:
-        tensor: Tensor
-    
-    Returns:
-        linf_norm: float
-    """
     return torch.max(torch.abs(tensor)).item()
 
 
 def visualize_noise(noise, scale=10.0):
-    """
-    可视化噪声
-    
-    Args:
-        noise: Tensor (C, H, W)，噪声
-        scale: float，放大倍数
-    
-    Returns:
-        PIL Image，可视化后的噪声
-    """
-    # 放大噪声以便可视化
     noise_vis = (noise * scale + 0.5).clamp(0, 1)
-    
-    # 转换为 PIL Image
     from torchvision.transforms import ToPILImage
     to_pil = ToPILImage()
     return to_pil(noise_vis)
 
 
 def compute_text_metrics(pred_text: str, true_text: str) -> Dict[str, Optional[float]]:
-    """
-    Compute text similarity metrics between predicted and true strings.
-    Returns a dict with keys: bertscore_f1, cosine_sim, bleu, rouge_l.
-    Missing backends will yield None for the corresponding metric.
-    """
     pred = (pred_text or "").strip()
     ref = (true_text or "").strip()
     if not pred or not ref:
@@ -214,7 +170,6 @@ def compute_text_metrics(pred_text: str, true_text: str) -> Dict[str, Optional[f
 
 
 class Timer:
-    """Simple context timer returning elapsed milliseconds in .ms."""
     def __enter__(self):
         self._start = time.perf_counter()
         self.ms = 0.0
@@ -225,9 +180,6 @@ class Timer:
 
 
 def get_cpu_memory_mb() -> Optional[float]:
-    """
-    Return current process RSS in MB if possible. Falls back gracefully.
-    """
     psutil = _lazy_import_psutil()
     try:
         if psutil and psutil is not False:
@@ -247,10 +199,6 @@ def get_cpu_memory_mb() -> Optional[float]:
 
 
 def get_cuda_memory_stats(device=None) -> Dict[str, Optional[float]]:
-    """
-    Return CUDA memory stats in MB: current_allocated, current_reserved, max_allocated, max_reserved.
-    If CUDA not available, values are None.
-    """
     if not torch.cuda.is_available():
         return {
             "current_allocated_mb": None,
@@ -280,9 +228,6 @@ def get_cuda_memory_stats(device=None) -> Dict[str, Optional[float]]:
 
 
 def create_data_template():
-    """
-    创建数据目录模板
-    """
     import os
     import json
     
@@ -334,11 +279,6 @@ def create_data_template():
         with open(normal_qa_path, 'w', encoding='utf-8') as f:
             json.dump(normal_qa, f, indent=2, ensure_ascii=False)
         
-        print(f"已创建模板: {app_dir}")
-    
-    print(f"\n数据目录模板已创建在: {data_root}")
-    print("请将图像文件放置在各应用的 images/ 目录下，并更新 QA 文件。")
-
 
 if __name__ == "__main__":
     # 创建数据目录模板

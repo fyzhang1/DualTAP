@@ -23,20 +23,13 @@ from attention import SaliencyAttention
 from set_seed_example import set_seed
 
 
-# ===== InternVL 专用输入构建（含 image_flags） =====
+
 IMG_START_TOKEN  = "<img>"
 IMG_END_TOKEN    = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 
 
 def build_internvl_inputs(question, answer, tokenizer, model, max_len=1024, num_patches=1):
-    """
-    返回: input_ids, attention_mask, labels, image_flags
-    逻辑：
-      1) 将 <image> 替换为 <img> + <IMG_CONTEXT>* (num_image_token * num_patches) + </img>
-      2) labels 仅监督答案段；问题段 + 所有视觉占位符置 -100
-      3) image_flags: [B, num_img_tokens]，标记 <IMG_CONTEXT> 位置为 1
-    """
     img_ctx_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
     if not hasattr(model, "img_context_token_id") or model.img_context_token_id is None:
         model.img_context_token_id = img_ctx_id
@@ -76,10 +69,6 @@ def build_internvl_inputs(question, answer, tokenizer, model, max_len=1024, num_
 
 
 def _vlm_forward_loss(images, qa_pairs, tokenizer, model, device, print_debug=False, debug_prefix=""):
-    """
-    与 train_new 中 compute_normal_task_loss/compute_privacy_task_loss 一致的核心前向，
-    通过返回每个 QA 的正向 loss 列表，便于在 EoT 中复用。
-    """
     losses = []
     batch_size = images.shape[0]
     model_dtype = next(model.parameters()).dtype
@@ -151,13 +140,6 @@ def compute_privacy_task_loss(images, qa_pairs, tokenizer, model, device):
 
 
 class EoTTransforms(nn.Module):
-    """
-    期望变换分布 D：
-    - 轻微仿射（旋转/平移/缩放/剪切）
-    - 颜色抖动（亮度/对比度/饱和度/色调）
-    - 高斯模糊
-    注意：仅使用对梯度友好的变换，保持张量维度不变。
-    """
     def __init__(self,
                  p_affine=0.9,
                  p_color=0.6,
@@ -195,12 +177,6 @@ class EoTTransforms(nn.Module):
         return angle, (trans_x, trans_y), scale, [shear, 0.0]
 
     def forward(self, images):
-        """
-        Args:
-            images: Tensor [B, C, H, W], 值域 [0,1]
-        Returns:
-            Tensor [B, C, H, W]
-        """
         device = images.device
         dtype = images.dtype
         b, c, h, w = images.shape
@@ -249,19 +225,6 @@ class EoTTransforms(nn.Module):
 
 def save_training_visualization(images, attention_map, delta, x_adv, save_path, 
                                 app_names=None, epoch=0, batch_idx=0, max_samples=4):
-    """
-    保存训练过程中的可视化图像
-    Args:
-        images: 原始图像 [B,3,H,W]
-        attention_map: 注意力图 [B,1,H,W] 或 [B,3,H,W]
-        delta: 生成的噪声 [B,3,H,W]
-        x_adv: 加噪后的图像 [B,3,H,W]
-        save_path: 保存路径
-        app_names: 应用名称列表
-        epoch: 当前epoch
-        batch_idx: 当前batch索引
-        max_samples: 最多保存几个样本
-    """
     batch_size = min(images.shape[0], max_samples)
     
     fig, axes = plt.subplots(batch_size, 5, figsize=(20, 4*batch_size))
@@ -269,10 +232,9 @@ def save_training_visualization(images, attention_map, delta, x_adv, save_path,
         axes = axes.reshape(1, -1)
     
     for i in range(batch_size):
-        # 转换为numpy用于可视化（先detach再转换）
         img_np = images[i].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
         
-        # 注意力图（取第一个通道或平均）
+
         if attention_map is not None:
             if attention_map.shape[1] == 1:
                 attn_np = attention_map[i, 0].detach().cpu().numpy()
@@ -281,19 +243,16 @@ def save_training_visualization(images, attention_map, delta, x_adv, save_path,
         else:
             attn_np = np.zeros_like(img_np[:,:,0])
         
-        # 噪声（取绝对值和平均）
+
         # delta_raw = delta[i].detach().cpu().permute(1, 2, 0).numpy()  # [H,W,3]
         delta_np = delta[i].detach().cpu().abs().mean(dim=0).numpy()
         # delta_np = (delta_raw * 10.0 + 0.5).clip(0, 1)
         
-        # 加噪后的图像
         x_adv_np = x_adv[i].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
         
-        # 差异图（放大10倍以便观察）
         diff_np = (x_adv_np - img_np).mean(axis=2)
         diff_np = (diff_np - diff_np.min()) / (diff_np.max() - diff_np.min() + 1e-8)
         
-        # 绘制子图
         axes[i, 0].imshow(img_np)
         axes[i, 0].set_title(f'Original\n{app_names[i] if app_names else ""}', fontsize=10)
         axes[i, 0].axis('off')
@@ -325,20 +284,10 @@ def save_training_visualization(images, attention_map, delta, x_adv, save_path,
 
 
 def save_noise_only(delta, save_path, epoch=0, batch_idx=0, max_samples=8):
-    """
-    仅保存噪声幅值图（灰度），不包含原图/注意力/差异图。
-    Args:
-        delta: Tensor [B,3,H,W]
-        save_path: 输出路径
-        epoch, batch_idx: 仅用于命名/日志
-        max_samples: 最多可视化的样本数
-    """
     try:
         b = min(delta.shape[0], max_samples)
-        # 用每像素的 |delta| 平均作为可视化（单通道）
         noise_map = delta[:b].detach().cpu().abs().mean(dim=1, keepdim=True)  # [b,1,H,W]
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        # 使用 torchvision 保存网格，normalize=True 做 min-max 归一化便于观察
         nrow = min(4, b)
         vutils.save_image(noise_map, save_path, nrow=nrow, normalize=True)
     except Exception as e:
@@ -364,10 +313,7 @@ class AdversarialTrainerEoT:
         self.vis_dir = os.path.join(self.log_dir, "test_64")
         os.makedirs(self.vis_dir, exist_ok=True)
 
-        print(f"使用设备: {self.device}")
-        print(f"EoT 样本数: {self.eot_samples}")
-
-        # 加载 surrogate VLM
+        # load surrogate VLM
         print(f"Loading surrogate MLLM: {config.surrogate_model_name}")
         self.model = AutoModel.from_pretrained(
             config.surrogate_model_name,
@@ -384,7 +330,6 @@ class AdversarialTrainerEoT:
             trust_remote_code=True
         )
 
-        print("初始化噪声生成器")
         self.generator = NoiseGenerator(
             in_channels=3,
             out_channels=3,
@@ -404,7 +349,6 @@ class AdversarialTrainerEoT:
             output_gate_with_attention=getattr(config, 'output_gate_with_attention', True),
         ).to(self.device)
 
-        # 注意力提取器（用于隐私任务显著图）
         self.attn_extractor = None
         if getattr(self.config, 'use_attention', True):
             self.attn_extractor = SaliencyAttention(
@@ -435,7 +379,6 @@ class AdversarialTrainerEoT:
         normal_qa_list = batch['normal_qa_list']
         app_names = batch.get('app_names', None)
 
-        # 计算隐私相关注意力图（可选）
         if getattr(self.config, 'use_attention', True) and self.attn_extractor is not None:
             with torch.enable_grad():
                 attention_map = self.attn_extractor.get_attention_map(images, privacy_qa_list, normal_qa_list)
@@ -445,7 +388,6 @@ class AdversarialTrainerEoT:
         delta  = self.generator(images, attention_map=attention_map)
         x_adv = images + delta
         x_adv = torch.clamp(x_adv, 0.0, 1.0)        
-        # 保存可视化（如果需要）
         if save_vis:
             if getattr(self.config, 'vis_noise_only', False):
                     vis_path = os.path.join(self.vis_dir, f"epoch_{epoch:03d}_batch_{batch_idx:04d}_noise.png")
@@ -461,7 +403,6 @@ class AdversarialTrainerEoT:
                 except Exception as e:
                         print(f"警告: 保存可视化失败: {e}")
 
-        # 额外正则：非注意力区域噪声惩罚与 TV 平滑（仅在使用注意力时启用 outside_loss）
         if attention_map is not None and getattr(self.config, 'noise_outside_weight', 0.0) > 0.0:
             shaped_for_loss = self.generator.shape_attention_map(attention_map, target_size=delta.shape[-2:], out_channels=1)
             out_mask = (1.0 - shaped_for_loss).clamp(0.0, 1.0)
@@ -473,12 +414,10 @@ class AdversarialTrainerEoT:
         tv_w = (delta[:, :, :, 1:] - delta[:, :, :, :-1]).abs().mean()
         tv_loss = tv_h + tv_w
 
-        # 正常路：不使用 EoT（直接在 x_adv 上优化“答对正常任务”）
         loss_normal = compute_normal_task_loss(
             x_adv, normal_qa_list, self.tokenizer, self.model, self.device
         )
 
-        # 隐私路：仅对隐私任务使用 EoT，取期望
         loss_privacy_accum = 0.0
         for _ in range(self.eot_samples):
             x_eot = self.transforms(x_adv)
@@ -513,12 +452,10 @@ class AdversarialTrainerEoT:
             'linf_norm': 0.0
         }
 
-        # 可视化保存频率：每N个batch保存一次
         vis_interval = getattr(self.config, 'vis_interval', 10)
         
-        pbar = tqdm(dataloader, desc=f"EoT Epoch {epoch}/{self.config.num_epochs}")
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{self.config.num_epochs}")
         for batch_idx, batch in enumerate(pbar):
-            # 决定是否保存可视化
             save_vis = (batch_idx % vis_interval == 0) or (batch_idx == 0)
             
             metrics = self.train_step(batch, batch_idx, epoch=epoch, save_vis=save_vis)
@@ -534,7 +471,7 @@ class AdversarialTrainerEoT:
             })
             
             if save_vis:
-                pbar.write(f"  → 已保存可视化: epoch_{epoch:03d}_batch_{batch_idx:04d}.png")
+                pbar.write(f"saved: epoch_{epoch:03d}_batch_{batch_idx:04d}.png")
             
             self.global_step += 1
 
@@ -551,17 +488,16 @@ class AdversarialTrainerEoT:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'config': self.config.__dict__
         }, checkpoint_path)
-        print(f"保存检查点: {checkpoint_path}")
+        print(f"save checkpoint: {checkpoint_path}")
 
     def save_history(self):
         history_path = os.path.join(self.log_dir, "train_history_eot.json")
         with open(history_path, 'w') as f:
             json.dump(self.history, f, indent=2)
-        print(f"保存训练历史: {history_path}")
+        print(f"training history: {history_path}")
 
     def train(self, dataloader):
         print("\n" + "="*50)
-        print("开始训练（EoT 版 - Expectation over Transformations）")
         print("="*50 + "\n")
 
         for epoch in range(1, self.config.num_epochs + 1):
@@ -573,19 +509,16 @@ class AdversarialTrainerEoT:
             self.history['psnr'].append(metrics['psnr'])
             self.history['linf_norm'].append(metrics['linf_norm'])
 
-            print(f"\nEpoch {epoch} 统计:")
-            print(f"  总损失: {metrics['loss_total']:.4f}")
-            print(f"  正常任务损失: {metrics['loss_normal']:.4f}")
-            print(f"  隐私任务损失: {metrics['loss_privacy']:.4f}")
-            print(f"  PSNR: {metrics['psnr']:.2f} dB")
-            print(f"  L-inf 范数: {metrics['linf_norm']:.6f}")
+            print(f"\nEpoch {epoch}:")
+            print(f"  total loss: {metrics['loss_total']:.4f}")
+            print(f"  normal loss: {metrics['loss_normal']:.4f}")
+            print(f"  privacy loss: {metrics['loss_privacy']:.4f}")
 
             if epoch % self.config.save_interval == 0:
                 self.save_checkpoint(epoch)
             self.save_history()
 
         print("\n" + "="*50)
-        print("训练完成（EoT）")
         print("="*50 + "\n")
         self.save_checkpoint(self.config.num_epochs)
 
@@ -594,19 +527,16 @@ def main():
     set_seed(42)
 
     config = Config()
-    # 为 EoT 运行打印关键信息
-    print("配置信息 (EoT):")
-    print(f"  数据根目录: {config.data_root}")
-    print(f"  Surrogate 模型: {config.surrogate_model_name}")
+    print(f"  data root: {config.data_root}")
+    print(f"  Surrogate model: {config.surrogate_model_name}")
     print(f"  Batch size: {config.batch_size}")
     print(f"  Epochs: {config.num_epochs}")
     print(f"  Learning rate: {config.learning_rate}")
     print(f"  Epsilon: {config.epsilon}")
     print(f"  Alpha: {config.alpha}")
     print(f"  Beta: {config.beta}")
-    print(f"  EoT samples: {getattr(config, 'eot_samples', 4)}")
 
-    print("\n加载数据集...")
+    print("\nload dataset...")
     dataset = PrivacyProtectionDataset(
         data_root=config.data_root,
         image_size=config.image_size,

@@ -5,13 +5,6 @@ import time
 
 
 class APIClient:
-    """
-    统一的多模态 API 客户端，支持：
-    - openai（如 gpt-4o 系列）
-    - gemini（Google Generative AI）
-    - openrouter（OpenAI 兼容协议，需设置 base_url）
-    """
-
     def __init__(self, api_type="openai", api_key=None, model_name=None, base_url=None):
         self.api_type = (api_type or "openai").lower()
         self.api_key = api_key or os.environ.get(f"{self._env_key_prefix()}_API_KEY")
@@ -20,31 +13,31 @@ class APIClient:
 
         if not self.api_key:
             raise ValueError(
-                f"请设置 {self._env_key_prefix()}_API_KEY 环境变量或通过参数传入 api_key"
+                f"please set {self._env_key_prefix()}_API_KEY"
             )
 
         if self.api_type in ("openai", "openrouter", "qwen"):
             try:
                 from openai import OpenAI
             except ImportError:
-                raise ImportError("请安装 openai 库: pip install openai")
+                raise ImportError("pip install openai")
 
             client_kwargs = {"api_key": self.api_key}
             if self.api_type == "openrouter":
-                # OpenRouter 使用 OpenAI 兼容接口，需要设置 base_url
+
                 client_kwargs["base_url"] = self.base_url or os.environ.get(
                     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
                 )
-                # 兼容默认模型名（可在 CLI 传入覆盖）
+
                 self.model_name = model_name or os.environ.get(
                     "OPENROUTER_MODEL", "openrouter/auto"
                 )
             elif self.api_type == "qwen":
-                # 阿里云 DashScope 的 OpenAI 兼容模式
+
                 client_kwargs["base_url"] = self.base_url or os.environ.get(
                     "OPENAI_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
                 )
-                # 默认多模态视觉模型
+
                 self.model_name = model_name or os.environ.get(
                     "QWEN_API_MODEL", "qwen-vl-max"
                 )
@@ -58,20 +51,20 @@ class APIClient:
             try:
                 import google.generativeai as genai
             except ImportError:
-                raise ImportError("请安装 google-generativeai 库: pip install google-generativeai")
+                raise ImportError("pip install google-generativeai")
             genai.configure(api_key=self.api_key)
             self._client_kind = "gemini"
             self.client = genai
             self.model_name = model_name or os.environ.get("GEMINI_MODEL", "gemini-1.5-pro")
 
         else:
-            raise ValueError(f"不支持的 API 类型: {self.api_type}")
+            raise ValueError(f"{self.api_type}")
 
     def _env_key_prefix(self):
         if self.api_type == "openrouter":
             return "OPENROUTER"
         if self.api_type == "qwen":
-            # DashScope 官方使用 DASHSCOPE_API_KEY
+
             return "DASHSCOPE"
         return self.api_type.upper()
 
@@ -91,10 +84,10 @@ class APIClient:
             except Exception as e:
                 last_err = e
                 if attempt < max_retries - 1:
-                    print(f"API调用失败，重试 {attempt + 1}/{max_retries}: {e}")
+                    print(f"please retry{attempt + 1}/{max_retries}: {e}")
                     time.sleep(2 ** attempt)
-        print(f"API调用最终失败: {last_err}")
-        return "Error: API调用失败"
+        print(f"{last_err}")
+        return "Error"
 
     def _query_openai_compatible(self, image_pil, question):
         base64_image = self._pil_to_base64(image_pil)

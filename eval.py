@@ -366,20 +366,52 @@ class SimpleEvaluator:
         5列：原始图像、注意力图、噪声、加噪后图像、差异图
         """
         try:
-            # 准备数据
-            img_np = images[0].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
-            x_adv_np = adversarial_images[0].detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
-            delta = (adversarial_images - images)[0].detach().cpu()
+            # 获取原始图像尺寸
+            from torchvision.transforms import ToPILImage
+            try:
+                orig_img = Image.open(image_path).convert('RGB')
+                orig_w, orig_h = orig_img.size
+            except Exception:
+                # 回退：若原图读取失败，则使用当前尺寸
+                orig_h, orig_w = adversarial_images.shape[-2:]
+            
+            # 将所有图像resize到原始尺寸
+            images_resized = F.interpolate(
+                images.detach().cpu(),
+                size=(orig_h, orig_w),
+                mode='bilinear',
+                align_corners=False
+            )
+            adversarial_images_resized = F.interpolate(
+                adversarial_images.detach().cpu(),
+                size=(orig_h, orig_w),
+                mode='bilinear',
+                align_corners=False
+            )
+            
+            # 准备数据（使用resize后的图像）
+            img_np = images_resized[0].permute(1, 2, 0).numpy().clip(0, 1)
+            x_adv_np = adversarial_images_resized[0].permute(1, 2, 0).numpy().clip(0, 1)
+            delta = (adversarial_images_resized - images_resized)[0]
             delta_np = delta.abs().mean(dim=0).numpy()
             
-            # 注意力图
+            # 注意力图（需要resize到原始尺寸）
             if attention_map is not None:
                 if attention_map.shape[1] == 1:
                     attn_np = attention_map[0, 0].detach().cpu().numpy()
                 else:
                     attn_np = attention_map[0].detach().cpu().mean(dim=0).numpy()
+                # Resize注意力图到原始尺寸
+                attn_tensor = torch.from_numpy(attn_np).unsqueeze(0).unsqueeze(0).float()
+                attn_resized = F.interpolate(
+                    attn_tensor,
+                    size=(orig_h, orig_w),
+                    mode='bilinear',
+                    align_corners=False
+                )[0, 0].numpy()
+                attn_np = attn_resized
             else:
-                attn_np = np.zeros_like(img_np[:,:,0])
+                attn_np = np.zeros((orig_h, orig_w))
             
             # 差异图
             diff_np = (x_adv_np - img_np).mean(axis=2)
@@ -433,19 +465,7 @@ class SimpleEvaluator:
             plt.close(fig)
             
             # 同时保存单独的加噪后图像（按原始截图尺寸保存）
-            from torchvision.transforms import ToPILImage
-            try:
-                orig_img = Image.open(image_path).convert('RGB')
-                orig_w, orig_h = orig_img.size
-            except Exception:
-                # 回退：若原图读取失败，则使用当前尺寸
-                orig_h, orig_w = adversarial_images.shape[-2:]
-            adv_resized = F.interpolate(
-                adversarial_images.detach().cpu(),
-                size=(orig_h, orig_w),
-                mode='bilinear',
-                align_corners=False
-            )[0].clamp(0, 1)
+            adv_resized = adversarial_images_resized[0].clamp(0, 1)
             pil_adv = ToPILImage()(adv_resized)
             adv_save_path = os.path.join(save_dir, f"{stem}_adversarial.png")
             pil_adv.save(adv_save_path)
