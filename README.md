@@ -1,8 +1,13 @@
-# DualTAP: A Dual-Task Adversarial Protector for Mobile MLLM Agents
+<p align="center">
+  <img src="assets/dualtap_readme_banner.png" width="420" alt="DualTAP logo">
+</p>
+
+<h1 align="center">DualTAP</h1>
 
 <p align="center">
-  <b>Protect privacy-sensitive mobile screenshots while preserving GUI-agent utility.</b>
+  <b>A Dual-Task Adversarial Protector for Mobile MLLM Agents</b>
 </p>
+
 
 <p align="center">
   <a href="#"><b>Fuyao Zhang</b></a><sup>1</sup> ·
