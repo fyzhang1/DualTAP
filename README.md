@@ -1,5 +1,6 @@
 <p align="center">
-  <img src="assets/dualtap_readme_banner.png" width="420" alt="DualTAP logo">
+  <img src="assets/dualtap_readme_banner.png" width="360" alt="DualTAP logo">
+  <img src="assets/privscreen_readme_banner.png" width="360" alt="PrivScreen logo">
 </p>
 
 <h1 align="center">DualTAP</h1>
