@@ -4,6 +4,27 @@
   <b>Protect privacy-sensitive mobile screenshots while preserving GUI-agent utility.</b>
 </p>
 
+<p align="center">
+  <a href="#"><b>Fuyao Zhang</b></a><sup>1</sup> ·
+  <a href="#"><b>Jiaming Zhang</b></a><sup>1,*</sup> ·
+  <a href="#"><b>Che Wang</b></a><sup>1,2</sup> ·
+  <a href="#"><b>Xiongtao Sun</b></a><sup>1,3</sup> ·
+  <a href="#"><b>Yurong Hao</b></a><sup>1</sup><br>
+  <a href="#"><b>Guowei Guan</b></a><sup>1</sup> ·
+  <a href="#"><b>Wenjie Li</b></a><sup>4</sup> ·
+  <a href="#"><b>Longtao Huang</b></a><sup>5</sup> ·
+  <a href="#"><b>Wei Yang Bryan Lim</b></a><sup>1</sup>
+</p>
+
+
+<p align="center">
+  <sup>1</sup>Nanyang Technological University &nbsp;&nbsp;
+  <sup>2</sup>Peking University &nbsp;&nbsp;
+  <sup>3</sup>Xidian University<br>
+  <sup>4</sup>Hebei Normal University &nbsp;&nbsp;
+  <sup>5</sup>Alibaba Group &nbsp;&nbsp;
+  <sup>*</sup>Corresponding author
+</p>
 
 <p align="center">
   <a href="https://arxiv.org/abs/2511.13248">
