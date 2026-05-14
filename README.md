@@ -30,7 +30,7 @@ It addresses a privacy-utility conflict that arises when mobile GUI agents send 
 DualTAP trains a generator with a **dual-task adversarial objective** and a **contrastive attention module**, enabling targeted perturbations over privacy-sensitive regions while maintaining task-relevant visual information.
 
 <p align="center">
-  <img src="assets/overview.png" width="85%" alt="DualTAP overview">
+  <img src="assets/overview.png" width="95%" alt="DualTAP overview">
 </p>
 
 ---
