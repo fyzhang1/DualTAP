@@ -89,6 +89,10 @@ We release **PrivScreen**, a dataset for evaluating the privacy-utility trade-of
 
 Dataset link: [PrivScreen on Hugging Face](https://huggingface.co/datasets/fyzzzzzz/PrivScreen)
 
+<p align="center">
+  <img src="assets/priv1.png" width="95%" alt="PrivScreen">
+</p>
+
 Expected directory structure:
 
 ```text
