@@ -44,4 +44,4 @@ class Config:
     vis_interval = 10 
     vis_noise_only = False
     
-    test_single_app = "real"
+    test_single_app = None
