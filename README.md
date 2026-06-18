@@ -7,11 +7,11 @@
   <img src="assets/p.png" width="95%" alt="PrivScreen">
 </p>
 
-<h1 align="center">DualTAP</h1>
+<h1 align="center">[ECCV 26] DualTAP: A Dual-Task Adversarial Protector for Mobile MLLM Agents</h1>
 
-<p align="center">
-  <b>A Dual-Task Adversarial Protector for Mobile MLLM Agents</b>
-</p>
+<!-- <p align="center">
+  <b></b>
+</p> -->
 
 
 <p align="center">
