@@ -4,7 +4,7 @@
 </p> -->
 
 <p align="center">
-  <img src="assets/priv1.png" width="95%" alt="PrivScreen">
+  <img src="assets/p.png" width="95%" alt="PrivScreen">
 </p>
 
 <h1 align="center">DualTAP</h1>
