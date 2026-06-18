@@ -68,7 +68,7 @@ DualTAP trains a generator with a **dual-task adversarial objective** and a **co
 
 ## 📃 News
 
-- **[2026-06]DualTAP has been accepted by ECCV 2026**.
+- **[2026-06] DualTAP has been accepted by ECCV 2026**.
 - [2025-12] We released the DualTAP code and PrivScreen Dataset.
 - [2025-11] The preprint version of our paper was published.
 
